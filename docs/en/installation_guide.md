@@ -5,7 +5,7 @@ Choose the appropriate installation method as needed and proceed to the correspo
 - **Quick Setup Based on Docker Images**: Use the out-of-the-box images released by Triton-Ascend to quickly build your development environment. Please follow the instructions in [OVERVIEW.md](../../docker/OVERVIEW.md).
 - **Install via pip**: Select this option if you intend to use the pip package of Triton-Ascend directly. Please proceed to the next step to complete the prerequisite configuration in <a href="#env-prepare">Environment Preparation</a>, then perform the pip installation.
 - **Install from source**: Select this option for developers working with the Triton-Ascend source code. Please proceed to the next step to complete the prerequisite configuration in <a href="#env-prepare">Environment Preparation</a>, then choose either <a href="#auto-code-base">Quick Installation</a> or <a href="#hand-code-base">Manual Installation</a>.
-- **Install via Docker**: No environment preparation required. You may directly proceed to <a href="#docker-build">Build with Docker</a>.
+- **Install via Dockerfile**: No environment preparation required. You may directly proceed to <a href="#docker-build">Install via Dockerfile</a>.
 
 ## Quick installation based on Docker image
 
@@ -16,6 +16,7 @@ Choose the appropriate installation method as needed and proceed to the correspo
 | Ascend 910b | Atlas 800T A2、Atlas 900 A2 PoD |  3.2.1-910b-ubuntu22.04-py3.11 |
 | Ascend A3   | Atlas 800T A3                  | 3.2.1-a3-ubuntu22.04-py3.11|
 | Ascend 950  | 950PR Series                   | 3.2.1-a3-ubuntu22.04-py3.11|
+
 Note：For more mirrors,please see [OVERVIEW.zh.md](../../docker/OVERVIEW.zh.md)
 
 ### Get Image
@@ -111,10 +112,10 @@ The preceding environment variable configurations take effect only in the curren
 
 #### Installing torch_npu
 
-The current torch_npu version is 2.7.1.
+The current torch_npu version is 2.7.1.post4.
 
 ```bash
-pip install torch_npu==2.7.1
+pip install torch_npu==2.7.1.post4
 ```
 
 Note: If `ERROR: No matching distribution found for torch==2.7.1+cpu` is displayed, you can manually install Torch and then install torch_npu.
@@ -313,7 +314,7 @@ git clone https://gitcode.com/Ascend/triton-ascend.git && cd triton-ascend
 
 <a id="docker-build"></a>
 
-### Installation via Docker
+### Install via Dockerfile
 
 We provide a Dockerfile to help you build a Docker environment image. The build uses pre-built CANN images from `quay.io/ascend/cann` as the base, which significantly speeds up the build process by skipping the CANN installation step.
 

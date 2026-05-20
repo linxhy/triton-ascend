@@ -146,7 +146,7 @@ The maximum difference between torch and triton is 0.0
 
 Triton-Ascend 在保持与社区 Triton 语法完全兼容的同时，只需在 **张量的设备声明** 和少量 `torch.cuda.*` 接口上做替换，原有 GPU 示例即可在昇腾 NPU 上运行。下面通过一个典型向量加法测试，演示完整的迁移过程。
 
-GPU 版本示例代码如下:
+GPU 版本示例文件`test_add.py`如下:
 
 ```python
 import pytest
@@ -241,3 +241,8 @@ def test_add(SIZE, BLOCK_SIZE):
     output_torch = x + y
     assert_close(output, output_torch, rtol=1e-3, atol=1e-3)
 ```
+修改完后，可用`pytest`运行用例，执行成功即表明迁移成功。
+```
+pytest test_add.py
+```
+若未安装`pytest`组件，可使用`pip install pytest`进行安装。
