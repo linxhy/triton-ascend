@@ -59,15 +59,34 @@ Compiler options control the compilation strategy for a single Triton kernel and
 For example, pass `multibuffer` directly during kernel launch:
 
 ```python
+import torch
+import torch_npu
 import triton
 import triton.language as tl
 
 @triton.jit
-def kernel(..., BLOCK_SIZE: tl.constexpr):
-    ...
+def add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = tl.load(y_ptr + offsets, mask=mask)
+    tl.store(out_ptr + offsets, x + y, mask=mask)
 
-grid = (triton.cdiv(n_elements, 1024),)
-kernel[grid](..., BLOCK_SIZE=1024, multibuffer=True)
+def add(x, y):
+    out = torch.empty_like(x)
+    n_elements = out.numel()
+    grid = (triton.cdiv(n_elements, 1024),)
+    add_kernel[grid](x, y, out, n_elements, BLOCK_SIZE=1024, multibuffer=True)
+    return out
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    x = torch.randn((4096,), device="npu", dtype=torch.float32)
+    y = torch.randn((4096,), device="npu", dtype=torch.float32)
+    out = add(x, y)
+    torch.npu.synchronize()
+    print(out[:4])
 ```
 
 ### Compiler Option Reference Table
