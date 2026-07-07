@@ -1,6 +1,6 @@
-# Minimal Dockerfile for Triton-Ascend Build
-# This Dockerfile contains ONLY the dependencies required for building Triton-Ascend
-# Runtime dependencies (torch-npu, CANN, etc.) are removed
+# Minimal Dockerfile for Triton-Ascend Build + Runtime
+# This Dockerfile contains build dependencies and torch-npu runtime
+# CANN runtime dependencies are removed (can be mounted from host)
 
 # Note: Using LLVM official apt source to install clang-20
 # LLVM apt source: https://apt.llvm.org/
@@ -109,198 +109,12 @@ RUN cd llvm-project \
     && cd ../.. \
     && rm -rf llvm-project
 
-# Stage 3: Final build environment
+# Stage 3: Final build + runtime environment
 FROM base AS build-env
 
 ARG PIP_SOURCE
-
-# Copy LLVM from builder stage
-COPY --from=llvm-builder /usr/local/llvm-install /usr/local/llvm-install
-
-# Set LLVM environment variable
-ENV LLVM_INSTALL_PREFIX=/usr/local/llvm-install
-ENV PATH=${LLVM_INSTALL_PREFIX}/bin:${PATH}
-ENV LD_LIBRARY_PATH=${LLVM_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}
-
-WORKDIR /workspace
-
-# Clone Triton-Ascend source (optional - can be mounted from host)
-# RUN git clone https://github.com/triton-lang/triton-ascend.git
-
-# Default command: Build Triton-Ascend
-CMD ["bash", "-c", "\
-    echo '=== Triton-Ascend Build Environment Ready ===' && \
-    echo 'LLVM Version: $(llvm-config --version)' && \
-    echo 'Python Version: $(python --version)' && \
-    echo '' && \
-    echo 'To build Triton-Ascend:' && \
-    echo '  1. Mount your source code: -v <local-path>:/workspace' && \
-    echo '  2. Run: pip install -e .' && \
-    echo '  3. Or use pre-compiled LLVM: export LLVM_SYSPATH=/usr/local/llvm-install' && \
-    echo '' && \
-    exec \"$@\"", "--"]
-
-# ========================================
-# USAGE INSTRUCTIONS
-# ========================================
-#
-# Build the image:
-#   docker build -f Dockerfile.build-minimal -t triton-ascend-builder:latest .
-#
-# Run with mounted source code:
-#   docker run -it --rm \
-#     -v $(pwd):/workspace \
-#     -w /workspace \
-#     triton-ascend-builder:latest \
-#     bash -c "pip install -e ."
-#
-# Or build from cloned repo inside container:
-#   docker run -it --rm triton-ascend-builder:latest \
-#     bash -c "git clone https://github.com/triton-lang/triton-ascend.git && \
-#              cd triton-ascend && \
-#              pip install -e ."
-#
-# Advantages of this minimal Dockerfile:
-#   1. ~70% smaller than original (no CANN, no torch-npu runtime)
-#   2. Faster build time (~30 min vs ~90 min)
-#   3. Focuses ONLY on build dependencies
-#   4. Can be used for CI/CD build pipelines
-#   5. Separates build environment from runtime environment
-#
-# What was removed from original Dockerfile:
-#   - CANN toolkit and ops packages (~2GB)
-#   - torch-npu runtime dependencies
-#   - Python compilation from source (using pre-built Python image)
-#   - Debug tools: vim, jq, tree, procps, sysstat, systemd
-#   - Network tools: ssh-server, ssh-client, net-tools, iproute2
-#   - Extra Python libraries: tabulate, pyyaml, scipy, numpy, etc.
-#   - Runtime system services: sudo, dos2unix, grep, findutils
-#   - Copyright banner scripts
-#
-# What is retained (Triton build essentials):
-#   - Python 3.11 (pre-built)
-#   - Build toolchain: gcc, g++, make, cmake
-#   - LLVM toolchain: clang-20, lld-20, ccache (from LLVM official apt source)
-#   - LLVM compiled from source (specific version + patch)
-#   - Python build deps: ninja, cmake, wheel, pybind11, setuptools
-#   - System libs: zlib1g-dev, libzstd-dev, libssl-dev
-#
-# ========================================# Minimal Dockerfile for Triton-Ascend Build
-# This Dockerfile contains ONLY the dependencies required for building Triton-Ascend
-# Runtime dependencies (torch-npu, CANN, etc.) are removed
-
-# Note: Using LLVM official apt source to install clang-20
-# LLVM apt source: https://apt.llvm.org/
-# This ensures we get the latest clang-20 version on Debian 12
-
-ARG PIP_SOURCE="https://mirrors.ustc.edu.cn/pypi/simple"
 ARG TARGETPLATFORM
 
-# Stage 1: Base environment with Python
-FROM python:3.11-slim-bookworm AS base
-
-ARG PIP_SOURCE
-
-# Install minimal system dependencies and add LLVM apt source
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
-        # Build essentials
-        build-essential \
-        gcc \
-        g++ \
-        make \
-        cmake \
-        git \
-        wget \
-        curl \
-        gnupg \
-        lsb-release \
-        software-properties-common \
-        # LLVM build dependencies
-        zlib1g-dev \
-        libzstd-dev \
-        ccache \
-        # Python build dependencies (minimal)
-        libssl-dev \
-        # Essential tools
-        ca-certificates \
-        bash \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Add LLVM official apt source and install clang-20
-RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - \
-    && echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list \
-    && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
-        clang-20 \
-        lld-20 \
-        clang-tools-20 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* \
-    # Create clang symlinks
-    && ln -sf /usr/bin/clang-20 /usr/bin/clang \
-    && ln -sf /usr/bin/clang++-20 /usr/bin/clang++ \
-    && ln -sf /usr/bin/lld-20 /usr/bin/lld \
-    && ln -sf /usr/bin/clang-format-20 /usr/bin/clang-format
-
-# Install Python build dependencies
-RUN pip install --no-cache-dir \
-    ninja \
-    cmake \
-    wheel \
-    pybind11 \
-    setuptools \
-    --index-url ${PIP_SOURCE}
-
-# Stage 2: Build LLVM (Triton's core dependency)
-FROM base AS llvm-builder
-
-ARG PIP_SOURCE
-
-WORKDIR /build
-
-# Configure git for large repos
-RUN git config --global http.postBuffer 524288000 \
-    && git config --global http.lowSpeedLimit 0 \
-    && git config --global http.lowSpeedTime 1800
-
-# Clone and checkout specific LLVM version
-RUN git clone --no-checkout https://github.com/llvm/llvm-project.git \
-    && cd llvm-project \
-    && git checkout fad3272286528b8a491085183434c5ad4b59ab92
-
-# Download and apply Triton-Ascend LLVM patch
-RUN cd llvm-project \
-    && wget -q https://raw.githubusercontent.com/triton-lang/triton-ascend/6765b03c81c4e9ecb277e4ef1dde61dea0d044f0/third_party/ascend/llvm_patch/fad3272.patch \
-    && git apply fad3272.patch \
-    && rm fad3272.patch
-
-# Build and install LLVM
-RUN cd llvm-project \
-    && mkdir build \
-    && cd build \
-    && export LLVM_INSTALL_PREFIX=/usr/local/llvm-install \
-    && cmake ../llvm \
-        -G Ninja \
-        -DCMAKE_C_COMPILER=/usr/bin/clang-20 \
-        -DCMAKE_CXX_COMPILER=/usr/bin/clang++-20 \
-        -DCMAKE_LINKER=/usr/bin/lld-20 \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DLLVM_ENABLE_ASSERTIONS=ON \
-        -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld" \
-        -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
-        -DLLVM_ENABLE_LLD=ON \
-        -DCMAKE_INSTALL_PREFIX=${LLVM_INSTALL_PREFIX} \
-    && ninja install \
-    && cd ../.. \
-    && rm -rf llvm-project
-
-# Stage 3: Final build environment
-FROM base AS build-env
-
-ARG PIP_SOURCE
-
 # Copy LLVM from builder stage
 COPY --from=llvm-builder /usr/local/llvm-install /usr/local/llvm-install
 
@@ -308,6 +122,25 @@ COPY --from=llvm-builder /usr/local/llvm-install /usr/local/llvm-install
 ENV LLVM_INSTALL_PREFIX=/usr/local/llvm-install
 ENV PATH=${LLVM_INSTALL_PREFIX}/bin:${PATH}
 ENV LD_LIBRARY_PATH=${LLVM_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}
+
+# Install torch-npu runtime dependencies
+RUN pip install --no-cache-dir \
+    pyyaml \
+    tabulate \
+    --index-url ${PIP_SOURCE}
+
+# Install torch-npu and triton-ascend (based on original Dockerfile)
+RUN case "${TARGETPLATFORM}" in \
+        "linux/amd64")  \
+            echo "install torch-npu for the x86 architecture"; \
+            pip install --no-cache-dir torch==2.7.1+cpu --index-url https://download.pytorch.org/whl/cpu;; \
+        "linux/arm64") \
+            echo "install torch-npu for the arm architecture"; \
+            pip install --no-cache-dir torch==2.7.1 --index-url ${PIP_SOURCE};; \
+        *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" && exit 1 ;; \
+    esac && \
+    pip install --no-cache-dir torch-npu==2.7.1.post4 --index-url ${PIP_SOURCE} && \
+    # pip install --no-cache-dir triton-ascend==3.2.1 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
 
 WORKDIR /workspace
 
@@ -347,29 +180,39 @@ CMD ["bash", "-c", "\
 #              cd triton-ascend && \
 #              pip install -e ."
 #
-# Advantages of this minimal Dockerfile:
-#   1. ~70% smaller than original (no CANN, no torch-npu runtime)
-#   2. Faster build time (~30 min vs ~90 min)
-#   3. Focuses ONLY on build dependencies
-#   4. Can be used for CI/CD build pipelines
-#   5. Separates build environment from runtime environment
+# Run Triton-Ascend examples (need NPU hardware and CANN mounted):
+#   docker run -it --rm \
+#     --device=/dev/davinci0 \
+#     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+#     -v $(pwd):/workspace \
+#     triton-ascend-builder:latest \
+#     python /workspace/examples/01-vector-add.py
+#
+# Advantages of this Dockerfile:
+#   1. Contains both build environment and torch-npu runtime
+#   2. Smaller than original (~60% reduction, no CANN pre-install)
+#   3. Faster build time (~35-45 min vs ~90 min)
+#   4. clang-20 for better compilation performance
+#   5. torch-npu included for immediate runtime capability
+#   6. CANN can be mounted from host (flexible deployment)
 #
 # What was removed from original Dockerfile:
-#   - CANN toolkit and ops packages (~2GB)
-#   - torch-npu runtime dependencies
+#   - CANN toolkit and ops packages (~2GB) - can be mounted from host
 #   - Python compilation from source (using pre-built Python image)
 #   - Debug tools: vim, jq, tree, procps, sysstat, systemd
 #   - Network tools: ssh-server, ssh-client, net-tools, iproute2
-#   - Extra Python libraries: tabulate, pyyaml, scipy, numpy, etc.
 #   - Runtime system services: sudo, dos2unix, grep, findutils
 #   - Copyright banner scripts
 #
-# What is retained (Triton build essentials):
+# What is retained (Essential dependencies):
 #   - Python 3.11 (pre-built)
 #   - Build toolchain: gcc, g++, make, cmake
 #   - LLVM toolchain: clang-20, lld-20, ccache (from LLVM official apt source)
 #   - LLVM compiled from source (specific version + patch)
 #   - Python build deps: ninja, cmake, wheel, pybind11, setuptools
 #   - System libs: zlib1g-dev, libzstd-dev, libssl-dev
+#   - torch-npu==2.7.1.post4 (runtime)
+#   - triton-ascend==3.2.1 (runtime)
+#   - Runtime dependencies: pyyaml, tabulate
 #
 # ========================================
