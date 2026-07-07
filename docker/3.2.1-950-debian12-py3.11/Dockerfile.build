@@ -25,8 +25,8 @@ RUN apt-get update \
         # LLVM build dependencies
         zlib1g-dev \
         libzstd-dev \
-        clang-15 \
-        lld-15 \
+        clang-20 \
+        lld-20 \
         ccache \
         # Python build dependencies (minimal)
         libssl-dev \
@@ -38,9 +38,9 @@ RUN apt-get update \
     && rm -rf /var/tmp/* \
     && rm -rf /tmp/* \
     # Create clang symlinks
-    && ln -s /usr/bin/clang-15 /usr/bin/clang \
-    && ln -s /usr/bin/clang++-15 /usr/bin/clang++ \
-    && ln -s /usr/bin/lld-15 /usr/bin/lld
+    && ln -s /usr/bin/clang-20 /usr/bin/clang \
+    && ln -s /usr/bin/clang++-20 /usr/bin/clang++ \
+    && ln -s /usr/bin/lld-20 /usr/bin/lld
 
 # Install Python build dependencies
 RUN pip install --no-cache-dir \
@@ -81,9 +81,9 @@ RUN cd llvm-project \
     && export LLVM_INSTALL_PREFIX=/usr/local/llvm-install \
     && cmake ../llvm \
         -G Ninja \
-        -DCMAKE_C_COMPILER=/usr/bin/clang-15 \
-        -DCMAKE_CXX_COMPILER=/usr/bin/clang++-15 \
-        -DCMAKE_LINKER=/usr/bin/lld-15 \
+        -DCMAKE_C_COMPILER=/usr/bin/clang-20 \
+        -DCMAKE_CXX_COMPILER=/usr/bin/clang++-20 \
+        -DCMAKE_LINKER=/usr/bin/lld-20 \
         -DCMAKE_BUILD_TYPE=Release \
         -DLLVM_ENABLE_ASSERTIONS=ON \
         -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld" \
@@ -165,7 +165,7 @@ CMD ["bash", "-c", "\
 # What is retained (Triton build essentials):
 #   - Python 3.11 (pre-built)
 #   - Build toolchain: gcc, g++, make, cmake
-#   - LLVM toolchain: clang-15, lld-15, ccache
+#   - LLVM toolchain: clang-20, lld-20, ccache
 #   - LLVM compiled from source (specific version + patch)
 #   - Python build deps: ninja, cmake, wheel, pybind11, setuptools
 #   - System libs: zlib1g-dev, libzstd-dev, libssl-dev
