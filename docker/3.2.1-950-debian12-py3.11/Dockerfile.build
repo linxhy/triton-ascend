@@ -73,8 +73,7 @@ ARG PIP_SOURCE
 ENV PATH=/usr/local/python3.11.10/bin:${PATH}
 ENV LD_LIBRARY_PATH=/usr/local/python3.11.10/lib:${LD_LIBRARY_PATH}
 
-# Install minimal system dependencies (without cmake)
-# Note: Added all dependencies required by devtoolset-7 build script
+# Install minimal system dependencies
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
         # Build essentials
@@ -82,6 +81,7 @@ RUN apt-get update \
         gcc \
         g++ \
         make \
+        cmake \
         git \
         wget \
         curl \
@@ -90,7 +90,6 @@ RUN apt-get update \
         software-properties-common \
         unzip \
         xz-utils \
-        bzip2 \
         # LLVM build dependencies
         zlib1g-dev \
         libzstd-dev \
@@ -100,44 +99,8 @@ RUN apt-get update \
         # Essential tools
         ca-certificates \
         bash \
-        # devtoolset-7 build dependencies (critical)
-        unar \
-        cpio \
-        rpm2cpio \
-        gcc-multilib \
-        texinfo \
-        flex \
-        bison \
-        symlinks \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-
-# Install cmake 3.28.2 from Kitware official binary
-# Note: Debian 12 default cmake is 3.25.1, need specific version 3.28.2
-RUN wget -q https://github.com/Kitware/CMake/releases/download/v3.28.2/cmake-3.28.2-linux-x86_64.tar.gz -O /tmp/cmake-3.28.2.tar.gz \
-    && tar -xzf /tmp/cmake-3.28.2.tar.gz -C /usr/local \
-    && mv /usr/local/cmake-3.28.2-linux-x86_64 /usr/local/cmake-3.28.2 \
-    && ln -sf /usr/local/cmake-3.28.2/bin/cmake /usr/bin/cmake \
-    && ln -sf /usr/local/cmake-3.28.2/bin/cpack /usr/bin/cpack \
-    && ln -sf /usr/local/cmake-3.28.2/bin/ctest /usr/bin/ctest \
-    && rm /tmp/cmake-3.28.2.tar.gz
-
-# Install devtoolset-7 from Huawei Cloud OBS
-# Note: Package contains source code, execute build-devtoolset7.sh to compile
-RUN umask 022 \
-    && cd /tmp \
-    && wget -q https://aoe-flow.obs.cn-north-4.myhuaweicloud.com:443/inference/dockerfile/devtoolset7.zip \
-    && unzip -q devtoolset7.zip \
-    && cd devtoolset7 \
-    && bash -x build-devtoolset7.sh \
-    && echo "=== Finding compiled GCC ===" \
-    && find /opt/rh -name "gcc" -o -name "g++" 2>/dev/null \
-    && echo "=== Checking devtoolset-7 directory ===" \
-    && ls -la /opt/rh/ \
-    && rm -rf /tmp/*
-
-# Configure devtoolset-7 environment (use standard path)
-# To enable: source /opt/rh/devtoolset-7/enable (if exists)
 
 # Install Python build dependencies
 RUN pip install --no-cache-dir \
@@ -166,14 +129,14 @@ RUN wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.
     mv llvm-project-20.1.8.src llvm-project-20.1.8 && \
     rm llvm-project-20.1.8.tar.xz
 
-# Build clang-20.1.8 with devtoolset-7 GCC-7 (single-stage, Release build)
-# Note: Using devtoolset-7 GCC for consistent toolchain and CUDA compatibility
+# Build clang-20.1.8 with GCC (single-stage, Release build)
 RUN cd llvm-project-20.1.8 \
-    && mkdir build && cd build \
+    && mkdir build \
+    && cd build \
     && cmake ../llvm \
         -G Ninja \
-        -DCMAKE_C_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/gcc \
-        -DCMAKE_CXX_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/g++ \
+        -DCMAKE_C_COMPILER=gcc \
+        -DCMAKE_CXX_COMPILER=g++ \
         -DCMAKE_BUILD_TYPE=Release \
         -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra" \
         -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
@@ -207,25 +170,25 @@ WORKDIR /build
 # Clone and checkout specific LLVM version (same as original Dockerfile)
 RUN git clone --no-checkout https://github.com/llvm/llvm-project.git \
     && cd llvm-project \
-    && git checkout b5cc222d7429fe6f18c787f633d5262fac2e676f
+    && git checkout fad3272286528b8a491085183434c5ad4b59ab92
+    && wget https://raw.githubusercontent.com/triton-lang/triton-ascend/6765b03c81c4e9ecb277e4ef1dde61dea0d044f0/third_party/ascend/llvm_patch/fad3272.patch
+    && git apply fad3272.patch
 
-# Build and install Triton-LLVM using devtoolset-7 GCC-7
-# Note: DEFAULT_SYSROOT set to devtoolset-7 root for consistent toolchain
+# Build and install Triton-LLVM using clang-20.1.8
 RUN cd llvm-project \
-    && mkdir build && cd build \
+    && mkdir build \
+    && cd build \
     && export LLVM_INSTALL_PREFIX=/usr/local/llvm-install \
     && cmake ../llvm \
         -G Ninja \
-        -DCLANG_DEFAULT_LINKER=lld \
-        -DCMAKE_C_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/gcc \
-        -DCMAKE_CXX_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/g++ \
-        -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
+        -DCMAKE_C_COMPILER=/usr/local/clang-20.1.8/bin/clang \
+        -DCMAKE_CXX_COMPILER=/usr/local/clang-20.1.8/bin/clang++ \
+        -DCMAKE_LINKER=/usr/local/clang-20.1.8/bin/lld \
         -DCMAKE_BUILD_TYPE=Release \
-        -DLLVM_ENABLE_TERMINFO=OFF \
-        -DHAVE_TERMINFO=0 \
-        -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra;compiler-rt" \
-        -DDEFAULT_SYSROOT=/opt/rh/devtoolset-7/root \
         -DLLVM_ENABLE_ASSERTIONS=ON \
+        -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld" \
+        -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
+        -DLLVM_ENABLE_LLD=ON \
         -DCMAKE_INSTALL_PREFIX=${LLVM_INSTALL_PREFIX} \
     && ninja install \
     && cd ../.. \
@@ -291,23 +254,13 @@ WORKDIR /workspace
 CMD ["bash", "-c", "\
     echo '=== Triton-Ascend Build Environment Ready ===' && \
     echo 'Clang Version: $(clang --version)' && \
-    echo 'GCC Default Version: $(gcc --version | head -n1)' && \
-    if [ -f /opt/rh/devtoolset-7/enable ]; then echo 'devtoolset-7: Available at /opt/rh/devtoolset-7'; fi && \
     echo 'Python 3.11 Version: $(python --version)' && \
     echo 'Python 3.12 Version: $(python3.12 --version)' && \
     echo 'LLVM Version: $(llvm-config --version)' && \
     echo '' && \
-    echo 'Available compilers:' && \
-    echo '  - clang (default) -> clang-20.1.8' && \
-    echo '  - gcc (default) -> GCC-12 (Debian 12 default)' && \
-    echo '  - devtoolset-7 -> GCC-7 (CentOS/RHEL compatible)' && \
-    echo '' && \
     echo 'Available Python versions:' && \
     echo '  - python (default) -> Python 3.11.10' && \
     echo '  - python3.12 -> Python 3.12.13' && \
-    echo '' && \
-    echo 'To enable devtoolset-7 environment (GCC-7):' && \
-    echo '  source /opt/rh/devtoolset-7/enable' && \
     echo '' && \
     echo 'To build Triton-Ascend:' && \
     echo '  1. Mount your source code: -v <local-path>:/workspace' && \
@@ -345,59 +298,33 @@ CMD ["bash", "-c", "\
 #     triton-ascend-builder:latest \
 #     python /workspace/examples/01-vector-add.py
 #
-# Enable devtoolset-7 environment (GCC-7):
-#   docker run -it --rm \
-#     -v $(pwd):/workspace \
-#     -w /workspace \
-#     triton-ascend-builder:latest \
-#     bash -c "source /opt/rh/devtoolset-7/enable && pip install -e ."
-#
 # Specifications:
 #   - clang: 20.1.8 (exact version, compiled from LLVM 20.1.8 source)
 #   - clang-tools-extra: included (clang-tidy, clang-format, etc.)
-#   - cmake: 3.28.2 (exact version, from Kitware official binary)
-#   - GCC: 12 (default, Debian 12) + 7 (devtoolset-7 from Huawei Cloud)
 #   - Python: 3.11.10 (default) and 3.12.13 (available via python3.12)
 #   - Triton-LLVM: compiled from source with clang-20.1.8
 #   - torch-npu: 2.7.1.post4
 #   - triton-ascend: 3.2.1
 #
-# devtoolset-7 Details:
-#   - Source: Huawei Cloud OBS (https://aoe-flow.obs.cn-north-4.myhuaweicloud.com)
-#   - Install path: /opt/rh/devtoolset-7 (CentOS/RHEL standard path)
-#   - Enabled via: source /opt/rh/devtoolset-7/enable
-#   - Compatible with: scl enable devtoolset-7 bash (CentOS/RHEL)
-#   - Use case: CUDA compilation, legacy code requiring GCC-7
-#
-# cmake 3.28.2 Details:
-#   - Source: Kitware official binary (https://github.com/Kitware/CMake/releases/download/v3.28.2)
-#   - Version: 3.28.2 (exact version as required)
-#   - Install path: /usr/local/cmake-3.28.2
-#   - Reason: Triton-LLVM build requires cmake >= 3.28 for modern features
-#   - Install method: wget + tar extraction + symlink
-#
 # Build stages:
 #   1. Stage 0: python-installer - Compile Python 3.11.10 and 3.12.13
-#   2. Stage 1: base - Install system dependencies, devtoolset-7, cmake 3.28.2
-#   3. Stage 2: clang-builder - Compile clang-20.1.8 from LLVM 20.1.8 source (using devtoolset-7 GCC-7)
-#   4. Stage 3: llvm-builder - Build Triton-LLVM (clang, lld, compiler-rt) using devtoolset-7 GCC-7
+#   2. Stage 1: base - Install system dependencies and Python build tools
+#   3. Stage 2: clang-builder - Compile clang-20.1.8 from LLVM 20.1.8 source (using GCC)
+#   4. Stage 3: llvm-builder - Compile Triton-LLVM using clang-20.1.8
 #   5. Stage 4: build-env - Merge all components and install torch-npu
 #
 # Advantages:
 #   1. clang-20.1.8 compiled from official LLVM source (not third-party prebuilt)
 #   2. Full LLVM 20.1.8 toolchain: clang, lld, clang-tools-extra
 #   3. Dual Python support: 3.11.10 (default) + 3.12.13
-#   4. Dual GCC support: GCC-12 (default) + GCC-7 (devtoolset-7 equivalent)
-#   5. Smaller than original (~60% reduction, no CANN pre-install)
-#   6. Build time: ~60-75 min (clang compilation adds ~15-20 min)
-#   7. torch-npu included for immediate runtime capability
-#   8. CANN can be mounted from host (flexible deployment)
-#   9. devtoolset-7 environment for legacy code/CUDA compatibility
+#   4. Smaller than original (~60% reduction, no CANN pre-install)
+#   5. Build time: ~60-75 min (clang compilation adds ~15-20 min)
+#   6. torch-npu included for immediate runtime capability
+#   7. CANN can be mounted from host (flexible deployment)
 #
 # clang-20.1.8 Build Details:
 #   - Source: LLVM 20.1.8 (https://github.com/llvm/llvm-project/releases/tag/llvmorg-20.1.8)
-#   - Build compiler: devtoolset-7 GCC-7 (for CUDA compatibility)
-#   - Build method: Single-stage compilation with GCC-7 (Release mode)
+#   - Build method: Single-stage compilation with GCC (Release mode)
 #   - Projects: clang, lld, clang-tools-extra
 #   - Optimization: Release build with optimized tablegen
 #   - Targets: host, NVPTX, AMDGPU (for Triton compatibility)
@@ -411,13 +338,11 @@ CMD ["bash", "-c", "\
 #
 # What is retained (Essential dependencies):
 #   - Python 3.11.10 and 3.12.13 (compiled from source)
-#   - Build toolchain: gcc-12, g++-12, make
-#   - cmake 3.28.2 (exact version, from Kitware official binary)
-#   - devtoolset-7: GCC-7 toolchain from Huawei Cloud OBS (/opt/rh/devtoolset-7)
+#   - Build toolchain: gcc, g++, make, cmake
 #   - clang-20.1.8 (compiled from LLVM 20.1.8 source)
 #   - clang-tools-extra (clang-tidy, clang-format, clangd, etc.)
 #   - Triton-LLVM compiled from source (specific version)
-#   - Python build deps: ninja, wheel, pybind11, setuptools
+#   - Python build deps: ninja, cmake, wheel, pybind11, setuptools
 #   - System libs: zlib1g-dev, libzstd-dev, libssl-dev
 #   - torch-npu==2.7.1.post4 (runtime)
 #   - triton-ascend==3.2.1 (runtime)
