@@ -2,19 +2,79 @@
 # This Dockerfile contains build dependencies and torch-npu runtime
 # CANN runtime dependencies are removed (can be mounted from host)
 
-# Note: Using LLVM official apt source to install clang-20
-# LLVM apt source: https://apt.llvm.org/
-# This ensures we get the latest clang-20 version on Debian 12
+# Specifications:
+# - clang: 20.1.8 (exact version, from xPack prebuilt binaries)
+# - Python: 3.11.10 and 3.12.13 (both compiled from source)
 
 ARG PIP_SOURCE="https://mirrors.ustc.edu.cn/pypi/simple"
 ARG TARGETPLATFORM
 
-# Stage 1: Base environment with Python
-FROM python:3.11-slim-bookworm AS base
+# Stage 0: Install Python (both 3.11.10 and 3.12.13)
+FROM library/debian:12 AS python-installer
+
+# Install Python build dependencies
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+        apt-transport-https \
+        ca-certificates \
+        bash \
+        curl \
+        build-essential \
+        libssl-dev \
+        zlib1g-dev \
+        libncurses5-dev \
+        libbz2-dev \
+        libreadline-dev \
+        libsqlite3-dev \
+        libffi-dev \
+        libnss3-dev \
+        libgdbm-dev \
+        liblzma-dev \
+        libev-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/tmp/* \
+    && rm -rf /tmp/*
+
+# Install Python 3.11.10
+RUN curl -fsSL https://repo.huaweicloud.com/python/3.11.10/Python-3.11.10.tgz -o /tmp/Python-3.11.10.tgz && \
+    tar -xf /tmp/Python-3.11.10.tgz -C /tmp && \
+    cd /tmp/Python-3.11.10 && \
+    mkdir -p /usr/local/python3.11.10/lib && \
+    ./configure --enable-shared --enable-shared LDFLAGS="-Wl,-rpath /usr/local/python3.11.10/lib" --prefix=/usr/local/python3.11.10 && \
+    make -j $(nproc) && \
+    make altinstall && \
+    ln -sf /usr/local/python3.11.10/bin/python3.11 /usr/local/python3.11.10/bin/python3 && \
+    ln -sf /usr/local/python3.11.10/bin/pip3.11 /usr/local/python3.11.10/bin/pip3 && \
+    ln -sf /usr/local/python3.11.10/bin/python3 /usr/local/python3.11.10/bin/python && \
+    ln -sf /usr/local/python3.11.10/bin/pip3 /usr/local/python3.11.10/bin/pip && \
+    rm -rf /tmp/*
+
+# Install Python 3.12.13
+RUN curl -fsSL https://repo.huaweicloud.com/python/3.12.13/Python-3.12.13.tgz -o /tmp/Python-3.12.13.tgz && \
+    tar -xf /tmp/Python-3.12.13.tgz -C /tmp && \
+    cd /tmp/Python-3.12.13 && \
+    mkdir -p /usr/local/python3.12.13/lib && \
+    ./configure --enable-shared --enable-shared LDFLAGS="-Wl,-rpath /usr/local/python3.12.13/lib" --prefix=/usr/local/python3.12.13 && \
+    make -j $(nproc) && \
+    make altinstall && \
+    ln -sf /usr/local/python3.12.13/bin/python3.12 /usr/local/python3.12.13/bin/python3 && \
+    ln -sf /usr/local/python3.12.13/bin/pip3.12 /usr/local/python3.12.13/bin/pip3 && \
+    ln -sf /usr/local/python3.12.13/bin/python3 /usr/local/python3.12.13/bin/python && \
+    ln -sf /usr/local/python3.12.13/bin/pip3 /usr/local/python3.12.13/bin/pip && \
+    rm -rf /tmp/*
+
+# Stage 1: Base environment with Python 3.11.10 (default)
+FROM python-installer AS base
 
 ARG PIP_SOURCE
+ARG TARGETPLATFORM
 
-# Install minimal system dependencies and add LLVM apt source
+# Set Python 3.11.10 as default
+ENV PATH=/usr/local/python3.11.10/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/python3.11.10/lib:${LD_LIBRARY_PATH}
+
+# Install minimal system dependencies
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
         # Build essentials
@@ -29,6 +89,8 @@ RUN apt-get update \
         gnupg \
         lsb-release \
         software-properties-common \
+        unzip \
+        xz-utils \
         # LLVM build dependencies
         zlib1g-dev \
         libzstd-dev \
@@ -41,21 +103,34 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Add LLVM official apt source and install clang-20
-RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - \
-    && echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list \
-    && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
-        clang-20 \
-        lld-20 \
-        clang-tools-20 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* \
+# Download and install clang-20.1.8 (exact version)
+# Using xPack prebuilt binaries from https://github.com/xpack-dev-tools/clang-xpack
+RUN case "${TARGETPLATFORM}" in \
+        "linux/amd64") \
+            CLANG_URL="https://github.com/xpack-dev-tools/clang-xpack/releases/download/v20.1.8-1/xpack-clang-20.1.8-1-linux-x64.tar.gz"; \
+            CLANG_SHA256="8d8b40ec9dc7dfd979f9908d61bccb376e48796b6180742a036ad0d7329ac96c"; \
+            ;; \
+        "linux/arm64") \
+            CLANG_URL="https://github.com/xpack-dev-tools/clang-xpack/releases/download/v20.1.8-1/xpack-clang-20.1.8-1-linux-arm64.tar.gz"; \
+            CLANG_SHA256="ae9c70f8e9a785dc7608565fdcc80bed9f87ea2c407c461e32e55efc40b21404"; \
+            ;; \
+        *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" && exit 1 ;; \
+    esac && \
+    wget -q ${CLANG_URL} -O /tmp/clang-20.1.8.tar.gz && \
+    echo "${CLANG_SHA256}  /tmp/clang-20.1.8.tar.gz" | sha256sum -c && \
+    mkdir -p /opt/xpack-clang-20.1.8 && \
+    tar -xf /tmp/clang-20.1.8.tar.gz -C /opt && \
+    rm /tmp/clang-20.1.8.tar.gz && \
     # Create clang symlinks
-    && ln -sf /usr/bin/clang-20 /usr/bin/clang \
-    && ln -sf /usr/bin/clang++-20 /usr/bin/clang++ \
-    && ln -sf /usr/bin/lld-20 /usr/bin/lld \
-    && ln -sf /usr/bin/clang-format-20 /usr/bin/clang-format
+    ln -sf /opt/xpack-clang-20.1.8/bin/clang /usr/bin/clang && \
+    ln -sf /opt/xpack-clang-20.1.8/bin/clang++ /usr/bin/clang++ && \
+    ln -sf /opt/xpack-clang-20.1.8/bin/clang-20 /usr/bin/clang-20 && \
+    ln -sf /opt/xpack-clang-20.1.8/bin/clang++-20 /usr/bin/clang++-20 && \
+    ln -sf /opt/xpack-clang-20.1.8/bin/lld /usr/bin/lld && \
+    ln -sf /opt/xpack-clang-20.1.8/bin/clang-format /usr/bin/clang-format
+
+# Add clang-20.1.8 to PATH
+ENV PATH=/opt/xpack-clang-20.1.8/bin:${PATH}
 
 # Install Python build dependencies
 RUN pip install --no-cache-dir \
@@ -89,16 +164,16 @@ RUN cd llvm-project \
     && git apply fad3272.patch \
     && rm fad3272.patch
 
-# Build and install LLVM
+# Build and install LLVM using clang-20.1.8
 RUN cd llvm-project \
     && mkdir build \
     && cd build \
     && export LLVM_INSTALL_PREFIX=/usr/local/llvm-install \
     && cmake ../llvm \
         -G Ninja \
-        -DCMAKE_C_COMPILER=/usr/bin/clang-20 \
-        -DCMAKE_CXX_COMPILER=/usr/bin/clang++-20 \
-        -DCMAKE_LINKER=/usr/bin/lld-20 \
+        -DCMAKE_C_COMPILER=/opt/xpack-clang-20.1.8/bin/clang \
+        -DCMAKE_CXX_COMPILER=/opt/xpack-clang-20.1.8/bin/clang++ \
+        -DCMAKE_LINKER=/opt/xpack-clang-20.1.8/bin/lld \
         -DCMAKE_BUILD_TYPE=Release \
         -DLLVM_ENABLE_ASSERTIONS=ON \
         -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld" \
@@ -118,10 +193,17 @@ ARG TARGETPLATFORM
 # Copy LLVM from builder stage
 COPY --from=llvm-builder /usr/local/llvm-install /usr/local/llvm-install
 
+# Copy Python 3.12.13 from python-installer (for dual-version support)
+COPY --from=python-installer /usr/local/python3.12.13 /usr/local/python3.12.13
+
 # Set LLVM environment variable
 ENV LLVM_INSTALL_PREFIX=/usr/local/llvm-install
-ENV PATH=${LLVM_INSTALL_PREFIX}/bin:${PATH}
-ENV LD_LIBRARY_PATH=${LLVM_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}
+ENV PATH=${LLVM_INSTALL_PREFIX}/bin:/usr/local/python3.11.10/bin:${PATH}
+ENV LD_LIBRARY_PATH=${LLVM_INSTALL_PREFIX}/lib:/usr/local/python3.11.10/lib:${LD_LIBRARY_PATH}
+
+# Create python3.12 symlink (optional, for users who want to use 3.12)
+RUN ln -sf /usr/local/python3.12.13/bin/python3.12 /usr/bin/python3.12 && \
+    ln -sf /usr/local/python3.12.13/bin/pip3.12 /usr/bin/pip3.12
 
 # Install torch-npu runtime dependencies
 RUN pip install --no-cache-dir \
@@ -139,8 +221,8 @@ RUN case "${TARGETPLATFORM}" in \
             pip install --no-cache-dir torch==2.7.1 --index-url ${PIP_SOURCE};; \
         *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" && exit 1 ;; \
     esac && \
-    pip install --no-cache-dir torch-npu==2.7.1.post4 --index-url ${PIP_SOURCE}
-    # pip install --no-cache-dir triton-ascend==3.2.1 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
+    pip install --no-cache-dir torch-npu==2.7.1.post4 --index-url ${PIP_SOURCE} && \
+    pip install --no-cache-dir triton-ascend==3.2.1 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
 
 WORKDIR /workspace
 
@@ -150,8 +232,14 @@ WORKDIR /workspace
 # Default command: Build Triton-Ascend
 CMD ["bash", "-c", "\
     echo '=== Triton-Ascend Build Environment Ready ===' && \
+    echo 'Clang Version: $(clang --version)' && \
+    echo 'Python 3.11 Version: $(python --version)' && \
+    echo 'Python 3.12 Version: $(python3.12 --version)' && \
     echo 'LLVM Version: $(llvm-config --version)' && \
-    echo 'Python Version: $(python --version)' && \
+    echo '' && \
+    echo 'Available Python versions:' && \
+    echo '  - python (default) -> Python 3.11.10' && \
+    echo '  - python3.12 -> Python 3.12.13' && \
     echo '' && \
     echo 'To build Triton-Ascend:' && \
     echo '  1. Mount your source code: -v <local-path>:/workspace' && \
@@ -167,18 +255,19 @@ CMD ["bash", "-c", "\
 # Build the image:
 #   docker build -f Dockerfile.build-minimal -t triton-ascend-builder:latest .
 #
-# Run with mounted source code:
+# Run with mounted source code (using Python 3.11.10):
 #   docker run -it --rm \
 #     -v $(pwd):/workspace \
 #     -w /workspace \
 #     triton-ascend-builder:latest \
 #     bash -c "pip install -e ."
 #
-# Or build from cloned repo inside container:
-#   docker run -it --rm triton-ascend-builder:latest \
-#     bash -c "git clone https://github.com/triton-lang/triton-ascend.git && \
-#              cd triton-ascend && \
-#              pip install -e ."
+# Run with Python 3.12.13:
+#   docker run -it --rm \
+#     -v $(pwd):/workspace \
+#     -w /workspace \
+#     triton-ascend-builder:latest \
+#     bash -c "python3.12 -m pip install -e ."
 #
 # Run Triton-Ascend examples (need NPU hardware and CANN mounted):
 #   docker run -it --rm \
@@ -188,31 +277,44 @@ CMD ["bash", "-c", "\
 #     triton-ascend-builder:latest \
 #     python /workspace/examples/01-vector-add.py
 #
+# Specifications:
+#   - clang: 20.1.8 (exact version, from xPack prebuilt binaries)
+#   - Python: 3.11.10 (default) and 3.12.13 (available via python3.12)
+#   - LLVM: compiled from source with clang-20.1.8
+#   - torch-npu: 2.7.1.post4
+#   - triton-ascend: 3.2.1
+#
 # Advantages of this Dockerfile:
-#   1. Contains both build environment and torch-npu runtime
-#   2. Smaller than original (~60% reduction, no CANN pre-install)
-#   3. Faster build time (~35-45 min vs ~90 min)
-#   4. clang-20 for better compilation performance
-#   5. torch-npu included for immediate runtime capability
-#   6. CANN can be mounted from host (flexible deployment)
+#   1. Exact clang version: 20.1.8 (not latest from apt source)
+#   2. Dual Python support: 3.11.10 (default) + 3.12.13
+#   3. Smaller than original (~60% reduction, no CANN pre-install)
+#   4. Faster build time (~35-45 min vs ~90 min)
+#   5. clang-20.1.8 for better compilation performance
+#   6. torch-npu included for immediate runtime capability
+#   7. CANN can be mounted from host (flexible deployment)
 #
 # What was removed from original Dockerfile:
 #   - CANN toolkit and ops packages (~2GB) - can be mounted from host
-#   - Python compilation from source (using pre-built Python image)
+#   - Python compilation from source (using pre-built Python image) -> NOW COMPILED FROM SOURCE
 #   - Debug tools: vim, jq, tree, procps, sysstat, systemd
 #   - Network tools: ssh-server, ssh-client, net-tools, iproute2
 #   - Runtime system services: sudo, dos2unix, grep, findutils
 #   - Copyright banner scripts
 #
 # What is retained (Essential dependencies):
-#   - Python 3.11 (pre-built)
+#   - Python 3.11.10 and 3.12.13 (compiled from source)
 #   - Build toolchain: gcc, g++, make, cmake
-#   - LLVM toolchain: clang-20, lld-20, ccache (from LLVM official apt source)
+#   - clang-20.1.8 (exact version, from xPack prebuilt)
 #   - LLVM compiled from source (specific version + patch)
 #   - Python build deps: ninja, cmake, wheel, pybind11, setuptools
 #   - System libs: zlib1g-dev, libzstd-dev, libssl-dev
 #   - torch-npu==2.7.1.post4 (runtime)
 #   - triton-ascend==3.2.1 (runtime)
 #   - Runtime dependencies: pyyaml, tabulate
+#
+# clang-20.1.8 Sources:
+#   - xPack GitHub Releases: https://github.com/xpack-dev-tools/clang-xpack/releases/tag/v20.1.8-1/
+#   - SHA256 checksums verified during installation
+#   - Requires GLIBC 2.28+ (Debian 12 has GLIBC 2.36, fully compatible)
 #
 # ========================================
