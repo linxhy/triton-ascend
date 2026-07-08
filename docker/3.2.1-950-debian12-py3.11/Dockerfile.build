@@ -139,7 +139,7 @@ RUN case "${TARGETPLATFORM}" in \
             pip install --no-cache-dir torch==2.7.1 --index-url ${PIP_SOURCE};; \
         *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" && exit 1 ;; \
     esac && \
-    pip install --no-cache-dir torch-npu==2.7.1.post4 --index-url ${PIP_SOURCE} && \
+    pip install --no-cache-dir torch-npu==2.7.1.post4 --index-url ${PIP_SOURCE}
     # pip install --no-cache-dir triton-ascend==3.2.1 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
 
 WORKDIR /workspace
