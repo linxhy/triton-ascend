@@ -193,6 +193,7 @@ RUN cd llvm-project \
         -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
         -DLLVM_ENABLE_LLD=ON \
         -DCMAKE_INSTALL_PREFIX=${LLVM_INSTALL_PREFIX} \
+        -DLLVM_BUILD_TOOLS=ON \
     && ninja install \
     && cd ../.. \
     && rm -rf llvm-project
