@@ -111,23 +111,38 @@ RUN wget -q https://github.com/Kitware/CMake/releases/download/v3.28.2/cmake-3.2
     && ln -sf /usr/local/cmake-3.28.2/bin/ctest /usr/bin/ctest \
     && rm /tmp/cmake-3.28.2.tar.gz
 
-# Download and install devtoolset-7 from Huawei Cloud OBS
-# Note: Package extracts to /opt/rh/devtoolset7 (no hyphen)
-# Note: Create symlink /opt/rh/devtoolset-7 -> /opt/rh/devtoolset7 for compatibility
+# Download and compile devtoolset-7 from Huawei Cloud OBS
+# Note: Package contains source code, not pre-built binaries
+# Note: Need to execute build-devtoolset7.sh to compile GCC-7
 RUN mkdir -p /opt/rh \
     && wget -q https://aoe-flow.obs.cn-north-4.myhuaweicloud.com:443/inference/dockerfile/devtoolset7.zip -O /tmp/devtoolset7.zip \
     && unzip -q /tmp/devtoolset7.zip -d /opt/rh \
-    && ln -sf /opt/rh/devtoolset7 /opt/rh/devtoolset-7 \
     && rm /tmp/devtoolset7.zip \
-    && echo "=== devtoolset7 directory structure ===" \
-    && ls -la /opt/rh/devtoolset7 \
-    && echo "=== Subdirectories ===" \
-    && find /opt/rh/devtoolset7 -maxdepth 2 -type d \
-    && echo "=== GCC/G++ binaries ===" \
-    && find /opt/rh/devtoolset7 -name "gcc" -o -name "g++" 2>/dev/null
+    && echo "=== Checking build script ===" \
+    && cat /opt/rh/devtoolset7/build-devtoolset7.sh \
+    && echo "=== Checking src directory ===" \
+    && ls -la /opt/rh/devtoolset7/src/ \
+    && echo "=== Checking depend directory ===" \
+    && ls -la /opt/rh/devtoolset7/depend/
+
+# Compile devtoolset-7 (execute build script)
+# Note: This will compile GCC-7 from source (estimated 30-60 minutes)
+RUN cd /opt/rh/devtoolset7 \
+    && chmod +x build-devtoolset7.sh \
+    && bash build-devtoolset7.sh \
+    && echo "=== Checking compiled GCC ===" \
+    && find /opt/rh -name "gcc" -o -name "g++" 2>/dev/null \
+    && echo "=== Creating symlink for compatibility ===" \
+    && if [ -d "/opt/rh/devtoolset7/root" ]; then \
+        ln -sf /opt/rh/devtoolset7 /opt/rh/devtoolset-7; \
+    elif [ -d "/opt/rh/devtoolset-7" ]; then \
+        echo "devtoolset-7 already exists"; \
+    else \
+        echo "ERROR: Cannot find devtoolset-7 installation directory"; \
+    fi
 
 # Configure devtoolset-7 environment
-# Note: Use /opt/rh/devtoolset-7 path (symlink to actual /opt/rh/devtoolset7)
+# Note: Use /opt/rh/devtoolset-7 path (symlink to actual /opt/rh/devtoolset7 if needed)
 # To enable: source /opt/rh/devtoolset-7/enable (if exists)
 
 # Install Python build dependencies
