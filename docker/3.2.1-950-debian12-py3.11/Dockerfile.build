@@ -74,7 +74,7 @@ ENV PATH=/usr/local/python3.11.10/bin:${PATH}
 ENV LD_LIBRARY_PATH=/usr/local/python3.11.10/lib:${LD_LIBRARY_PATH}
 
 # Install minimal system dependencies (without cmake)
-# Note: Added unar, rpm2cpio, cpio for devtoolset-7 build script
+# Note: Added all dependencies required by devtoolset-7 build script
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
         # Build essentials
@@ -90,6 +90,7 @@ RUN apt-get update \
         software-properties-common \
         unzip \
         xz-utils \
+        bzip2 \
         # LLVM build dependencies
         zlib1g-dev \
         libzstd-dev \
@@ -99,10 +100,15 @@ RUN apt-get update \
         # Essential tools
         ca-certificates \
         bash \
-        # devtoolset-7 build dependencies
+        # devtoolset-7 build dependencies (critical)
         unar \
         cpio \
         rpm2cpio \
+        gcc-multilib \
+        texinfo \
+        flex \
+        bison \
+        symlinks \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
