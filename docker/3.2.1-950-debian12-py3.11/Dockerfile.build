@@ -118,7 +118,13 @@ RUN mkdir -p /opt/rh \
     && wget -q https://aoe-flow.obs.cn-north-4.myhuaweicloud.com:443/inference/dockerfile/devtoolset7.zip -O /tmp/devtoolset7.zip \
     && unzip -q /tmp/devtoolset7.zip -d /opt/rh \
     && ln -sf /opt/rh/devtoolset7 /opt/rh/devtoolset-7 \
-    && rm /tmp/devtoolset7.zip
+    && rm /tmp/devtoolset7.zip \
+    && echo "=== devtoolset7 directory structure ===" \
+    && ls -la /opt/rh/devtoolset7 \
+    && echo "=== Subdirectories ===" \
+    && find /opt/rh/devtoolset7 -maxdepth 2 -type d \
+    && echo "=== GCC/G++ binaries ===" \
+    && find /opt/rh/devtoolset7 -name "gcc" -o -name "g++" 2>/dev/null
 
 # Configure devtoolset-7 environment
 # Note: Use /opt/rh/devtoolset-7 path (symlink to actual /opt/rh/devtoolset7)
