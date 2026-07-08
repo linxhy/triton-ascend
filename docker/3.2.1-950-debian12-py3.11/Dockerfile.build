@@ -115,11 +115,14 @@ RUN wget -q https://github.com/Kitware/CMake/releases/download/v3.28.2/cmake-3.2
 RUN mkdir -p /opt/rh \
     && wget -q https://aoe-flow.obs.cn-north-4.myhuaweicloud.com:443/inference/dockerfile/devtoolset7.zip -O /tmp/devtoolset7.zip \
     && unzip -q /tmp/devtoolset7.zip -d /opt/rh \
-    && rm /tmp/devtoolset7.zip
+    && rm /tmp/devtoolset7.zip \
+    && ls -la /opt/rh/ \
+    && ls -la /opt/rh/devtoolset-7/ || echo "devtoolset-7 directory structure different, checking alternatives:" \
+    && find /opt/rh -name "gcc" -o -name "g++" 2>/dev/null | head -20
 
-# Configure devtoolset-7 environment
+# Configure devtoolset-7 environment (if enable script exists)
 # Note: devtoolset-7 is installed at /opt/rh/devtoolset-7 (CentOS/RHEL standard path)
-# To enable: source /opt/rh/devtoolset-7/enable (similar to scl enable devtoolset-7 bash)
+# If enable script missing, use hardcoded paths directly
 
 # Install Python build dependencies
 RUN pip install --no-cache-dir \
@@ -150,24 +153,24 @@ RUN wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.
 
 # Build clang-20.1.8 with devtoolset-7 GCC-7 (single-stage, Release build)
 # Note: Using devtoolset-7 GCC for consistent toolchain and CUDA compatibility
-RUN bash -c "source /opt/rh/devtoolset-7/enable && \
-    cd llvm-project-20.1.8 && \
-    mkdir build && cd build && \
-    cmake ../llvm \
+# Note: Directly using hardcoded paths (no dependency on enable script)
+RUN cd llvm-project-20.1.8 \
+    && mkdir build && cd build \
+    && cmake ../llvm \
         -G Ninja \
         -DCMAKE_C_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/gcc \
         -DCMAKE_CXX_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/g++ \
         -DCMAKE_BUILD_TYPE=Release \
-        -DLLVM_ENABLE_PROJECTS='clang;lld;clang-tools-extra' \
-        -DLLVM_TARGETS_TO_BUILD='host;NVPTX;AMDGPU' \
+        -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra" \
+        -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
         -DLLVM_ENABLE_LLD=OFF \
         -DCMAKE_INSTALL_PREFIX=/usr/local/clang-20.1.8 \
         -DLLVM_ENABLE_ASSERTIONS=OFF \
-        -DLLVM_OPTIMIZED_TABLEGEN=ON && \
-    ninja -j \$(nproc) && \
-    ninja install && \
-    cd ../.. && \
-    rm -rf llvm-project-20.1.8"
+        -DLLVM_OPTIMIZED_TABLEGEN=ON \
+    && ninja -j $(nproc) \
+    && ninja install \
+    && cd ../.. \
+    && rm -rf llvm-project-20.1.8
 
 # Create clang symlinks
 RUN ln -sf /usr/local/clang-20.1.8/bin/clang /usr/bin/clang && \
@@ -193,26 +196,26 @@ RUN git clone --no-checkout https://github.com/llvm/llvm-project.git \
     && git checkout b5cc222d7429fe6f18c787f633d5262fac2e676f
 
 # Build and install Triton-LLVM using devtoolset-7 GCC-7
-RUN bash -c "source /opt/rh/devtoolset-7/enable && \
-    cd llvm-project && \
-    mkdir build && cd build && pwd && \
-    export LLVM_INSTALL_PREFIX=/usr/local/llvm-install && \
-    cmake ../llvm \
+# Note: Directly using hardcoded paths (no dependency on enable script)
+RUN cd llvm-project \
+    && mkdir build && cd build \
+    && export LLVM_INSTALL_PREFIX=/usr/local/llvm-install \
+    && cmake ../llvm \
         -G Ninja \
         -DCLANG_DEFAULT_LINKER=lld \
         -DCMAKE_C_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/gcc \
         -DCMAKE_CXX_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/g++ \
-        -DLLVM_TARGETS_TO_BUILD='host;NVPTX;AMDGPU' \
+        -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
         -DCMAKE_BUILD_TYPE=Release \
         -DLLVM_ENABLE_TERMINFO=OFF \
         -DHAVE_TERMINFO=0 \
-        -DLLVM_ENABLE_PROJECTS='clang;lld;clang-tools-extra;compiler-rt' \
+        -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra;compiler-rt" \
         -DDEFAULT_SYSROOT=/opt/rh/devtoolset-7/root \
         -DLLVM_ENABLE_ASSERTIONS=ON \
-        -DCMAKE_INSTALL_PREFIX=${LLVM_INSTALL_PREFIX} && \
-    ninja install && \
-    cd ../.. && \
-    rm -rf llvm-project"
+        -DCMAKE_INSTALL_PREFIX=${LLVM_INSTALL_PREFIX} \
+    && ninja install \
+    && cd ../.. \
+    && rm -rf llvm-project
 
 # Stage 4: Final build + runtime environment
 FROM base AS build-env
