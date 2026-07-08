@@ -153,16 +153,10 @@ RUN git config --global http.postBuffer 524288000 \
     && git config --global http.lowSpeedLimit 0 \
     && git config --global http.lowSpeedTime 1800
 
-# Clone and checkout specific LLVM version
+# Clone and checkout specific LLVM version (same as original Dockerfile)
 RUN git clone --no-checkout https://github.com/llvm/llvm-project.git \
     && cd llvm-project \
-    && git checkout fad3272286528b8a491085183434c5ad4b59ab92
-
-# Download and apply Triton-Ascend LLVM patch
-RUN cd llvm-project \
-    && wget -q https://raw.githubusercontent.com/triton-lang/triton-ascend/6765b03c81c4e9ecb277e4ef1dde61dea0d044f0/third_party/ascend/llvm_patch/fad3272.patch \
-    && git apply fad3272.patch \
-    && rm fad3272.patch
+    && git checkout b5cc222d7429fe6f18c787f633d5262fac2e676f
 
 # Build and install LLVM using clang-20.1.8
 RUN cd llvm-project \
