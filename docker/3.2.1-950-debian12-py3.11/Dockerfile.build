@@ -3,7 +3,7 @@
 # CANN runtime dependencies are removed (can be mounted from host)
 
 # Specifications:
-# - clang: 20.1.8 (exact version, from xPack prebuilt binaries)
+# - clang: 20.1.8 (exact version, compiled from LLVM source)
 # - Python: 3.11.10 and 3.12.13 (both compiled from source)
 
 ARG PIP_SOURCE="https://mirrors.ustc.edu.cn/pypi/simple"
@@ -68,7 +68,6 @@ RUN curl -fsSL https://repo.huaweicloud.com/python/3.12.13/Python-3.12.13.tgz -o
 FROM python-installer AS base
 
 ARG PIP_SOURCE
-ARG TARGETPLATFORM
 
 # Set Python 3.11.10 as default
 ENV PATH=/usr/local/python3.11.10/bin:${PATH}
@@ -103,35 +102,6 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and install clang-20.1.8 (exact version)
-# Using xPack prebuilt binaries from https://github.com/xpack-dev-tools/clang-xpack
-# Note: xPack package name includes revision number: xpack-clang-20.1.8-1
-RUN case "${TARGETPLATFORM}" in \
-        "linux/amd64") \
-            CLANG_URL="https://github.com/xpack-dev-tools/clang-xpack/releases/download/v20.1.8-1/xpack-clang-20.1.8-1-linux-x64.tar.gz"; \
-            CLANG_SHA256="8d8b40ec9dc7dfd979f9908d61bccb376e48796b6180742a036ad0d7329ac96c"; \
-            ;; \
-        "linux/arm64") \
-            CLANG_URL="https://github.com/xpack-dev-tools/clang-xpack/releases/download/v20.1.8-1/xpack-clang-20.1.8-1-linux-arm64.tar.gz"; \
-            CLANG_SHA256="ae9c70f8e9a785dc7608565fdcc80bed9f87ea2c407c461e32e55efc40b21404"; \
-            ;; \
-        *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" && exit 1 ;; \
-    esac && \
-    wget -q ${CLANG_URL} -O /tmp/clang-20.1.8.tar.gz && \
-    echo "${CLANG_SHA256}  /tmp/clang-20.1.8.tar.gz" | sha256sum -c && \
-    tar -xf /tmp/clang-20.1.8.tar.gz -C /opt && \
-    rm /tmp/clang-20.1.8.tar.gz && \
-    # Create clang symlinks (note: xPack extracts to xpack-clang-20.1.8-1)
-    ln -sf /opt/xpack-clang-20.1.8-1/bin/clang /usr/bin/clang && \
-    ln -sf /opt/xpack-clang-20.1.8-1/bin/clang++ /usr/bin/clang++ && \
-    ln -sf /opt/xpack-clang-20.1.8-1/bin/clang-20 /usr/bin/clang-20 && \
-    ln -sf /opt/xpack-clang-20.1.8-1/bin/clang++-20 /usr/bin/clang++-20 && \
-    ln -sf /opt/xpack-clang-20.1.8-1/bin/lld /usr/bin/lld && \
-    ln -sf /opt/xpack-clang-20.1.8-1/bin/clang-format /usr/bin/clang-format
-
-# Add clang-20.1.8 to PATH
-ENV PATH=/opt/xpack-clang-20.1.8-1/bin:${PATH}
-
 # Install Python build dependencies
 RUN pip install --no-cache-dir \
     ninja \
@@ -141,8 +111,8 @@ RUN pip install --no-cache-dir \
     setuptools \
     --index-url ${PIP_SOURCE}
 
-# Stage 2: Build LLVM (Triton's core dependency)
-FROM base AS llvm-builder
+# Stage 2: Build clang-20.1.8 from LLVM source
+FROM base AS clang-builder
 
 ARG PIP_SOURCE
 
@@ -153,21 +123,65 @@ RUN git config --global http.postBuffer 524288000 \
     && git config --global http.lowSpeedLimit 0 \
     && git config --global http.lowSpeedTime 1800
 
+# Download LLVM 20.1.8 source (exact version)
+RUN wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/llvm-project-20.1.8.src.tar.xz -O llvm-project-20.1.8.tar.xz && \
+    tar -xf llvm-project-20.1.8.tar.xz && \
+    mv llvm-project-20.1.8.src llvm-project-20.1.8 && \
+    rm llvm-project-20.1.8.tar.xz
+
+# Build clang-20.1.8 with GCC (single-stage, Release build)
+RUN cd llvm-project-20.1.8 \
+    && mkdir build \
+    && cd build \
+    && cmake ../llvm \
+        -G Ninja \
+        -DCMAKE_C_COMPILER=gcc \
+        -DCMAKE_CXX_COMPILER=g++ \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra" \
+        -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
+        -DLLVM_ENABLE_LLD=OFF \
+        -DCMAKE_INSTALL_PREFIX=/usr/local/clang-20.1.8 \
+        -DLLVM_ENABLE_ASSERTIONS=OFF \
+        -DLLVM_OPTIMIZED_TABLEGEN=ON \
+    && ninja -j $(nproc) \
+    && ninja install \
+    && cd ../.. \
+    && rm -rf llvm-project-20.1.8
+
+# Create clang symlinks
+RUN ln -sf /usr/local/clang-20.1.8/bin/clang /usr/bin/clang && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang++ /usr/bin/clang++ && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang-20 /usr/bin/clang-20 && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang++-20 /usr/bin/clang++-20 && \
+    ln -sf /usr/local/clang-20.1.8/bin/lld /usr/bin/lld && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang-format /usr/bin/clang-format
+
+# Add clang-20.1.8 to PATH
+ENV PATH=/usr/local/clang-20.1.8/bin:${PATH}
+
+# Stage 3: Build Triton-LLVM using clang-20.1.8
+FROM clang-builder AS llvm-builder
+
+ARG PIP_SOURCE
+
+WORKDIR /build
+
 # Clone and checkout specific LLVM version (same as original Dockerfile)
 RUN git clone --no-checkout https://github.com/llvm/llvm-project.git \
     && cd llvm-project \
     && git checkout b5cc222d7429fe6f18c787f633d5262fac2e676f
 
-# Build and install LLVM using clang-20.1.8
+# Build and install Triton-LLVM using clang-20.1.8
 RUN cd llvm-project \
     && mkdir build \
     && cd build \
     && export LLVM_INSTALL_PREFIX=/usr/local/llvm-install \
     && cmake ../llvm \
         -G Ninja \
-        -DCMAKE_C_COMPILER=/opt/xpack-clang-20.1.8-1/bin/clang \
-        -DCMAKE_CXX_COMPILER=/opt/xpack-clang-20.1.8-1/bin/clang++ \
-        -DCMAKE_LINKER=/opt/xpack-clang-20.1.8-1/bin/lld \
+        -DCMAKE_C_COMPILER=/usr/local/clang-20.1.8/bin/clang \
+        -DCMAKE_CXX_COMPILER=/usr/local/clang-20.1.8/bin/clang++ \
+        -DCMAKE_LINKER=/usr/local/clang-20.1.8/bin/lld \
         -DCMAKE_BUILD_TYPE=Release \
         -DLLVM_ENABLE_ASSERTIONS=ON \
         -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld" \
@@ -178,22 +192,33 @@ RUN cd llvm-project \
     && cd ../.. \
     && rm -rf llvm-project
 
-# Stage 3: Final build + runtime environment
+# Stage 4: Final build + runtime environment
 FROM base AS build-env
 
 ARG PIP_SOURCE
 ARG TARGETPLATFORM
 
-# Copy LLVM from builder stage
+# Copy clang-20.1.8 from clang-builder stage
+COPY --from=clang-builder /usr/local/clang-20.1.8 /usr/local/clang-20.1.8
+
+# Copy LLVM from llvm-builder stage
 COPY --from=llvm-builder /usr/local/llvm-install /usr/local/llvm-install
 
 # Copy Python 3.12.13 from python-installer (for dual-version support)
 COPY --from=python-installer /usr/local/python3.12.13 /usr/local/python3.12.13
 
-# Set LLVM environment variable
+# Set environment variables
 ENV LLVM_INSTALL_PREFIX=/usr/local/llvm-install
-ENV PATH=${LLVM_INSTALL_PREFIX}/bin:/usr/local/python3.11.10/bin:${PATH}
-ENV LD_LIBRARY_PATH=${LLVM_INSTALL_PREFIX}/lib:/usr/local/python3.11.10/lib:${LD_LIBRARY_PATH}
+ENV PATH=/usr/local/clang-20.1.8/bin:/usr/local/llvm-install/bin:/usr/local/python3.11.10/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/clang-20.1.8/lib:/usr/local/llvm-install/lib:/usr/local/python3.11.10/lib:${LD_LIBRARY_PATH}
+
+# Create clang symlinks in final stage
+RUN ln -sf /usr/local/clang-20.1.8/bin/clang /usr/bin/clang && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang++ /usr/bin/clang++ && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang-20 /usr/bin/clang-20 && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang++-20 /usr/bin/clang++-20 && \
+    ln -sf /usr/local/clang-20.1.8/bin/lld /usr/bin/lld && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang-format /usr/bin/clang-format
 
 # Create python3.12 symlink (optional, for users who want to use 3.12)
 RUN ln -sf /usr/local/python3.12.13/bin/python3.12 /usr/bin/python3.12 && \
@@ -272,24 +297,38 @@ CMD ["bash", "-c", "\
 #     python /workspace/examples/01-vector-add.py
 #
 # Specifications:
-#   - clang: 20.1.8 (exact version, from xPack prebuilt binaries)
+#   - clang: 20.1.8 (exact version, compiled from LLVM 20.1.8 source)
+#   - clang-tools-extra: included (clang-tidy, clang-format, etc.)
 #   - Python: 3.11.10 (default) and 3.12.13 (available via python3.12)
-#   - LLVM: compiled from source with clang-20.1.8
+#   - Triton-LLVM: compiled from source with clang-20.1.8
 #   - torch-npu: 2.7.1.post4
 #   - triton-ascend: 3.2.1
 #
-# Advantages of this Dockerfile:
-#   1. Exact clang version: 20.1.8 (not latest from apt source)
-#   2. Dual Python support: 3.11.10 (default) + 3.12.13
-#   3. Smaller than original (~60% reduction, no CANN pre-install)
-#   4. Faster build time (~35-45 min vs ~90 min)
-#   5. clang-20.1.8 for better compilation performance
+# Build stages:
+#   1. Stage 0: python-installer - Compile Python 3.11.10 and 3.12.13
+#   2. Stage 1: base - Install system dependencies and Python build tools
+#   3. Stage 2: clang-builder - Compile clang-20.1.8 from LLVM 20.1.8 source (using GCC)
+#   4. Stage 3: llvm-builder - Compile Triton-LLVM using clang-20.1.8
+#   5. Stage 4: build-env - Merge all components and install torch-npu
+#
+# Advantages:
+#   1. clang-20.1.8 compiled from official LLVM source (not third-party prebuilt)
+#   2. Full LLVM 20.1.8 toolchain: clang, lld, clang-tools-extra
+#   3. Dual Python support: 3.11.10 (default) + 3.12.13
+#   4. Smaller than original (~60% reduction, no CANN pre-install)
+#   5. Build time: ~60-75 min (clang compilation adds ~15-20 min)
 #   6. torch-npu included for immediate runtime capability
 #   7. CANN can be mounted from host (flexible deployment)
 #
+# clang-20.1.8 Build Details:
+#   - Source: LLVM 20.1.8 (https://github.com/llvm/llvm-project/releases/tag/llvmorg-20.1.8)
+#   - Build method: Single-stage compilation with GCC (Release mode)
+#   - Projects: clang, lld, clang-tools-extra
+#   - Optimization: Release build with optimized tablegen
+#   - Targets: host, NVPTX, AMDGPU (for Triton compatibility)
+#
 # What was removed from original Dockerfile:
 #   - CANN toolkit and ops packages (~2GB) - can be mounted from host
-#   - Python compilation from source (using pre-built Python image) -> NOW COMPILED FROM SOURCE
 #   - Debug tools: vim, jq, tree, procps, sysstat, systemd
 #   - Network tools: ssh-server, ssh-client, net-tools, iproute2
 #   - Runtime system services: sudo, dos2unix, grep, findutils
@@ -298,17 +337,17 @@ CMD ["bash", "-c", "\
 # What is retained (Essential dependencies):
 #   - Python 3.11.10 and 3.12.13 (compiled from source)
 #   - Build toolchain: gcc, g++, make, cmake
-#   - clang-20.1.8 (exact version, from xPack prebuilt)
-#   - LLVM compiled from source (specific version + patch)
+#   - clang-20.1.8 (compiled from LLVM 20.1.8 source)
+#   - clang-tools-extra (clang-tidy, clang-format, clangd, etc.)
+#   - Triton-LLVM compiled from source (specific version)
 #   - Python build deps: ninja, cmake, wheel, pybind11, setuptools
 #   - System libs: zlib1g-dev, libzstd-dev, libssl-dev
 #   - torch-npu==2.7.1.post4 (runtime)
 #   - triton-ascend==3.2.1 (runtime)
 #   - Runtime dependencies: pyyaml, tabulate
 #
-# clang-20.1.8 Sources:
-#   - xPack GitHub Releases: https://github.com/xpack-dev-tools/clang-xpack/releases/tag/v20.1.8-1/
-#   - SHA256 checksums verified during installation
-#   - Requires GLIBC 2.28+ (Debian 12 has GLIBC 2.36, fully compatible)
+# LLVM Source Download:
+#   - LLVM 20.1.8 release: https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/llvm-project-20.1.8.src.tar.xz
+#   - Triton-LLVM commit: b5cc222d7429fe6f18c787f633d5262fac2e676f
 #
 # ========================================
