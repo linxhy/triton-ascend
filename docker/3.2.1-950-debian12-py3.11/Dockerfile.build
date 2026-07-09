@@ -198,6 +198,7 @@ RUN cd llvm-project \
         -DLLVM_BUILD_TOOLS=ON \
     && ninja install \
     && cd ../.. \
+    && cp llvm_project/build/bin/FileCheck ${LLVM_INSTALL_PREFIX}/bin/FileCheck
     && rm -rf llvm-project
 
 # Stage 4: Final build + runtime environment
