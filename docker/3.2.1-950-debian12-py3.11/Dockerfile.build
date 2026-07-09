@@ -174,7 +174,7 @@ RUN git clone --no-checkout --branch main https://github.com/llvm/llvm-project.g
     && cd llvm-project \
     && git fetch origin f6ded0be897e2878612dd903f7e8bb85448269e5 \
     && git checkout f6ded0be897e2878612dd903f7e8bb85448269e5 \
-    && git clone --no-checkout --branch main https://github.com/triton-lang/triton-ascend.git /tmp/triton-ascend \
+    && git clone --depth 1 --branch main https://github.com/triton-lang/triton-ascend.git /tmp/triton-ascend \
     && cp /tmp/triton-ascend/third_party/ascend/llvm_patch/f6ded0b.patch ./ \
     && rm -rf /tmp/triton-ascend \
     && git apply f6ded0b.patch
