@@ -83,6 +83,7 @@ RUN apt-get update \
         make \
         cmake \
         git \
+        vim \
         wget \
         curl \
         gnupg \
@@ -99,6 +100,7 @@ RUN apt-get update \
         # Essential tools
         ca-certificates \
         bash \
+        dos2unix \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -168,11 +170,11 @@ ARG PIP_SOURCE
 WORKDIR /build
 
 # Clone and checkout specific LLVM version (same as original Dockerfile)
-RUN git clone --depth 1 --branch main https://github.com/llvm/llvm-project.git \
+RUN git clone --no-checkout --branch main https://github.com/llvm/llvm-project.git \
     && cd llvm-project \
     && git fetch origin fad3272286528b8a491085183434c5ad4b59ab92 \
     && git checkout fad3272286528b8a491085183434c5ad4b59ab92 \
-    && git clone --depth 1 --branch main https://github.com/triton-lang/triton-ascend.git /tmp/triton-ascend \
+    && git clone --no-checkout --branch main https://github.com/triton-lang/triton-ascend.git /tmp/triton-ascend \
     && cp /tmp/triton-ascend/third_party/ascend/llvm_patch/fad3272.patch ./ \
     && rm -rf /tmp/triton-ascend \
     && git apply fad3272.patch
