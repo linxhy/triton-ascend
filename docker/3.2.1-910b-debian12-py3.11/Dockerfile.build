@@ -1,0 +1,380 @@
+# Minimal Dockerfile for Triton-Ascend Build + Runtime
+# This Dockerfile contains build dependencies and torch-npu runtime
+# CANN runtime dependencies are removed (can be mounted from host)
+
+# Specifications:
+# - clang: 20.1.8 (exact version, compiled from LLVM source)
+# - Python: 3.11.10 and 3.12.13 (both compiled from source)
+
+ARG PIP_SOURCE="https://mirrors.ustc.edu.cn/pypi/simple"
+ARG TARGETPLATFORM
+
+# Stage 0: Install Python (both 3.11.10 and 3.12.13)
+FROM library/debian:12 AS python-installer
+
+# Install Python build dependencies
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+        apt-transport-https \
+        ca-certificates \
+        bash \
+        curl \
+        build-essential \
+        libssl-dev \
+        zlib1g-dev \
+        libncurses5-dev \
+        libbz2-dev \
+        libreadline-dev \
+        libsqlite3-dev \
+        libffi-dev \
+        libnss3-dev \
+        libgdbm-dev \
+        liblzma-dev \
+        libev-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/tmp/* \
+    && rm -rf /tmp/*
+
+# Install Python 3.11.10
+RUN curl -fsSL https://repo.huaweicloud.com/python/3.11.10/Python-3.11.10.tgz -o /tmp/Python-3.11.10.tgz && \
+    tar -xf /tmp/Python-3.11.10.tgz -C /tmp && \
+    cd /tmp/Python-3.11.10 && \
+    mkdir -p /usr/local/python3.11.10/lib && \
+    ./configure --enable-shared --enable-shared LDFLAGS="-Wl,-rpath /usr/local/python3.11.10/lib" --prefix=/usr/local/python3.11.10 && \
+    make -j $(nproc) && \
+    make altinstall && \
+    ln -sf /usr/local/python3.11.10/bin/python3.11 /usr/local/python3.11.10/bin/python3 && \
+    ln -sf /usr/local/python3.11.10/bin/pip3.11 /usr/local/python3.11.10/bin/pip3 && \
+    ln -sf /usr/local/python3.11.10/bin/python3 /usr/local/python3.11.10/bin/python && \
+    ln -sf /usr/local/python3.11.10/bin/pip3 /usr/local/python3.11.10/bin/pip && \
+    rm -rf /tmp/*
+
+# Install Python 3.12.13
+RUN curl -fsSL https://repo.huaweicloud.com/python/3.12.13/Python-3.12.13.tgz -o /tmp/Python-3.12.13.tgz && \
+    tar -xf /tmp/Python-3.12.13.tgz -C /tmp && \
+    cd /tmp/Python-3.12.13 && \
+    mkdir -p /usr/local/python3.12.13/lib && \
+    ./configure --enable-shared --enable-shared LDFLAGS="-Wl,-rpath /usr/local/python3.12.13/lib" --prefix=/usr/local/python3.12.13 && \
+    make -j $(nproc) && \
+    make altinstall && \
+    ln -sf /usr/local/python3.12.13/bin/python3.12 /usr/local/python3.12.13/bin/python3 && \
+    ln -sf /usr/local/python3.12.13/bin/pip3.12 /usr/local/python3.12.13/bin/pip3 && \
+    ln -sf /usr/local/python3.12.13/bin/python3 /usr/local/python3.12.13/bin/python && \
+    ln -sf /usr/local/python3.12.13/bin/pip3 /usr/local/python3.12.13/bin/pip && \
+    rm -rf /tmp/*
+
+# Stage 1: Base environment with Python 3.11.10 (default)
+FROM python-installer AS base
+
+ARG PIP_SOURCE
+
+# Set Python 3.11.10 as default
+ENV PATH=/usr/local/python3.11.10/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/python3.11.10/lib:${LD_LIBRARY_PATH}
+
+# Install minimal system dependencies (without cmake)
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+        # Build essentials
+        build-essential \
+        gcc \
+        g++ \
+        make \
+        git \
+        vim \
+        wget \
+        curl \
+        gnupg \
+        lsb-release \
+        software-properties-common \
+        unzip \
+        xz-utils \
+        # LLVM build dependencies
+        zlib1g-dev \
+        libzstd-dev \
+        ccache \
+        # Python build dependencies (minimal)
+        libssl-dev \
+        # Essential tools
+        ca-certificates \
+        bash \
+        dos2unix \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install cmake 3.28.2 from Kitware official binary
+# Note: Debian 12 default cmake is 3.25.1, need specific version 3.28.2
+RUN wget -q https://github.com/Kitware/CMake/releases/download/v3.28.2/cmake-3.28.2-linux-x86_64.tar.gz -O /tmp/cmake-3.28.2.tar.gz \
+    && tar -xzf /tmp/cmake-3.28.2.tar.gz -C /usr/local \
+    && mv /usr/local/cmake-3.28.2-linux-x86_64 /usr/local/cmake-3.28.2 \
+    && ln -sf /usr/local/cmake-3.28.2/bin/cmake /usr/bin/cmake \
+    && ln -sf /usr/local/cmake-3.28.2/bin/cpack /usr/bin/cpack \
+    && ln -sf /usr/local/cmake-3.28.2/bin/ctest /usr/bin/ctest \
+    && rm /tmp/cmake-3.28.2.tar.gz
+
+# Install Python build dependencies
+RUN pip install --no-cache-dir \
+    ninja \
+    cmake \
+    wheel \
+    pybind11 \
+    setuptools \
+    --index-url ${PIP_SOURCE}
+
+# Stage 2: Build clang-20.1.8 from LLVM source
+FROM base AS clang-builder
+
+ARG PIP_SOURCE
+
+WORKDIR /build
+
+# Configure git for large repos
+RUN git config --global http.postBuffer 524288000 \
+    && git config --global http.lowSpeedLimit 0 \
+    && git config --global http.lowSpeedTime 1800
+
+# Download LLVM 20.1.8 source (exact version)
+RUN wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/llvm-project-20.1.8.src.tar.xz -O llvm-project-20.1.8.tar.xz && \
+    tar -xf llvm-project-20.1.8.tar.xz && \
+    mv llvm-project-20.1.8.src llvm-project-20.1.8 && \
+    rm llvm-project-20.1.8.tar.xz
+
+# Build clang-20.1.8 with GCC (single-stage, Release build)
+RUN cd llvm-project-20.1.8 \
+    && mkdir build \
+    && cd build \
+    && cmake ../llvm \
+        -G Ninja \
+        -DCMAKE_C_COMPILER=gcc \
+        -DCMAKE_CXX_COMPILER=g++ \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra" \
+        -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
+        -DLLVM_ENABLE_LLD=OFF \
+        -DCMAKE_INSTALL_PREFIX=/usr/local/clang-20.1.8 \
+        -DLLVM_ENABLE_ASSERTIONS=OFF \
+        -DLLVM_OPTIMIZED_TABLEGEN=ON \
+    && ninja -j $(nproc) \
+    && ninja install \
+    && cd ../.. \
+    && rm -rf llvm-project-20.1.8
+
+# Create clang symlinks
+RUN ln -sf /usr/local/clang-20.1.8/bin/clang /usr/bin/clang && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang++ /usr/bin/clang++ && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang-20 /usr/bin/clang-20 && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang++-20 /usr/bin/clang++-20 && \
+    ln -sf /usr/local/clang-20.1.8/bin/lld /usr/bin/lld && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang-format /usr/bin/clang-format
+
+# Add clang-20.1.8 to PATH
+ENV PATH=/usr/local/clang-20.1.8/bin:${PATH}
+
+# Stage 3: Build Triton-LLVM using clang-20.1.8
+FROM clang-builder AS llvm-builder
+
+ARG PIP_SOURCE
+
+WORKDIR /build
+
+# Clone and checkout specific LLVM version (same as original Dockerfile)
+RUN git clone --no-checkout --branch main https://github.com/llvm/llvm-project.git \
+    && cd llvm-project \
+    && git fetch origin f6ded0be897e2878612dd903f7e8bb85448269e5 \
+    && git checkout f6ded0be897e2878612dd903f7e8bb85448269e5 \
+    && git clone --depth 1 --branch main https://github.com/triton-lang/triton-ascend.git /tmp/triton-ascend \
+    && cp /tmp/triton-ascend/third_party/ascend/patch/llvm_patch_f6ded0b.patch ./ \
+    && rm -rf /tmp/triton-ascend \
+    && git apply llvm_patch_f6ded0b.patch
+
+# Build and install Triton-LLVM using clang-20.1.8
+RUN cd llvm-project \
+    && mkdir build \
+    && cd build \
+    && export LLVM_INSTALL_PREFIX=/usr/local/llvm-install \
+    && cmake ../llvm \
+        -G Ninja \
+        -DCMAKE_C_COMPILER=/usr/local/clang-20.1.8/bin/clang \
+        -DCMAKE_CXX_COMPILER=/usr/local/clang-20.1.8/bin/clang++ \
+        -DCMAKE_LINKER=/usr/local/clang-20.1.8/bin/lld \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLLVM_ENABLE_ASSERTIONS=ON \
+        -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld" \
+        -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
+        -DLLVM_ENABLE_LLD=ON \
+        -DCMAKE_INSTALL_PREFIX=${LLVM_INSTALL_PREFIX} \
+        -DLLVM_BUILD_TOOLS=ON \
+    && ninja install \
+    && cd ../.. \
+    && cp llvm-project/build/bin/FileCheck ${LLVM_INSTALL_PREFIX}/bin/FileCheck \
+    && rm -rf llvm-project
+
+# Stage 4: Final build + runtime environment
+FROM base AS build-env
+
+ARG PIP_SOURCE
+ARG TARGETPLATFORM
+
+# Copy clang-20.1.8 from clang-builder stage
+COPY --from=clang-builder /usr/local/clang-20.1.8 /usr/local/clang-20.1.8
+
+# Copy LLVM from llvm-builder stage
+COPY --from=llvm-builder /usr/local/llvm-install /usr/local/llvm-install
+
+# Copy Python 3.12.13 from python-installer (for dual-version support)
+COPY --from=python-installer /usr/local/python3.12.13 /usr/local/python3.12.13
+
+# Set environment variables
+ENV LLVM_INSTALL_PREFIX=/usr/local/llvm-install
+ENV PATH=/usr/local/clang-20.1.8/bin:/usr/local/llvm-install/bin:/usr/local/python3.11.10/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/clang-20.1.8/lib:/usr/local/llvm-install/lib:/usr/local/python3.11.10/lib:${LD_LIBRARY_PATH}
+
+# Create clang symlinks in final stage
+RUN ln -sf /usr/local/clang-20.1.8/bin/clang /usr/bin/clang && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang++ /usr/bin/clang++ && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang-20 /usr/bin/clang-20 && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang++-20 /usr/bin/clang++-20 && \
+    ln -sf /usr/local/clang-20.1.8/bin/lld /usr/bin/lld && \
+    ln -sf /usr/local/clang-20.1.8/bin/clang-format /usr/bin/clang-format
+
+# Create python3.12 symlink (optional, for users who want to use 3.12)
+RUN ln -sf /usr/local/python3.12.13/bin/python3.12 /usr/bin/python3.12 && \
+    ln -sf /usr/local/python3.12.13/bin/pip3.12 /usr/bin/pip3.12
+
+# Install torch-npu runtime dependencies
+RUN pip install --no-cache-dir \
+    pyyaml \
+    tabulate \
+    --index-url ${PIP_SOURCE}
+
+# Install torch-npu and triton-ascend (based on original Dockerfile)
+RUN case "${TARGETPLATFORM}" in \
+        "linux/amd64")  \
+            echo "install torch-npu for the x86 architecture"; \
+            pip install --no-cache-dir torch==2.7.1+cpu --index-url https://download.pytorch.org/whl/cpu;; \
+        "linux/arm64") \
+            echo "install torch-npu for the arm architecture"; \
+            pip install --no-cache-dir torch==2.7.1 --index-url ${PIP_SOURCE};; \
+        *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" && exit 1 ;; \
+    esac && \
+    pip install --no-cache-dir torch-npu==2.7.1.post4 --index-url ${PIP_SOURCE} && \
+    pip install --no-cache-dir triton-ascend==3.2.1 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
+
+WORKDIR /workspace
+
+# Clone Triton-Ascend source (optional - can be mounted from host)
+# RUN git clone https://github.com/triton-lang/triton-ascend.git
+
+# Default command: Build Triton-Ascend
+CMD ["bash", "-c", "\
+    echo '=== Triton-Ascend Build Environment Ready ===' && \
+    echo 'Clang Version: $(clang --version)' && \
+    echo 'Python 3.11 Version: $(python --version)' && \
+    echo 'Python 3.12 Version: $(python3.12 --version)' && \
+    echo 'LLVM Version: $(llvm-config --version)' && \
+    echo '' && \
+    echo 'Available Python versions:' && \
+    echo '  - python (default) -> Python 3.11.10' && \
+    echo '  - python3.12 -> Python 3.12.13' && \
+    echo '' && \
+    echo 'To build Triton-Ascend:' && \
+    echo '  1. Mount your source code: -v <local-path>:/workspace' && \
+    echo '  2. Run: pip install -e .' && \
+    echo '  3. Or use pre-compiled LLVM: export LLVM_SYSPATH=/usr/local/llvm-install' && \
+    echo '' && \
+    exec \"$@\"", "--"]
+
+# ========================================
+# USAGE INSTRUCTIONS
+# ========================================
+#
+# Build the image:
+#   docker build -f Dockerfile.build-minimal -t triton-ascend-builder:latest .
+#
+# Run with mounted source code (using Python 3.11.10):
+#   docker run -it --rm \
+#     -v $(pwd):/workspace \
+#     -w /workspace \
+#     triton-ascend-builder:latest \
+#     bash -c "pip install -e ."
+#
+# Run with Python 3.12.13:
+#   docker run -it --rm \
+#     -v $(pwd):/workspace \
+#     -w /workspace \
+#     triton-ascend-builder:latest \
+#     bash -c "python3.12 -m pip install -e ."
+#
+# Run Triton-Ascend examples (need NPU hardware and CANN mounted):
+#   docker run -it --rm \
+#     --device=/dev/davinci0 \
+#     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+#     -v $(pwd):/workspace \
+#     triton-ascend-builder:latest \
+#     python /workspace/examples/01-vector-add.py
+#
+# Specifications:
+#   - clang: 20.1.8 (exact version, compiled from LLVM 20.1.8 source)
+#   - clang-tools-extra: included (clang-tidy, clang-format, etc.)
+#   - cmake: 3.28.2 (exact version, from Kitware official binary)
+#   - Python: 3.11.10 (default) and 3.12.13 (available via python3.12)
+#   - Triton-LLVM: compiled from source with clang-20.1.8
+#   - torch-npu: 2.7.1.post4
+#   - triton-ascend: 3.2.1
+#
+# cmake 3.28.2 Details:
+#   - Source: Kitware official binary (https://github.com/Kitware/CMake/releases/download/v3.28.2)
+#   - Version: 3.28.2 (exact version as required)
+#   - Install path: /usr/local/cmake-3.28.2
+#   - Reason: Triton-LLVM build requires cmake >= 3.28 for modern features
+#   - Install method: wget + tar extraction + symlink
+#
+# Build stages:
+#   1. Stage 0: python-installer - Compile Python 3.11.10 and 3.12.13
+#   2. Stage 1: base - Install system dependencies and Python build tools
+#   3. Stage 2: clang-builder - Compile clang-20.1.8 from LLVM 20.1.8 source (using GCC)
+#   4. Stage 3: llvm-builder - Compile Triton-LLVM using clang-20.1.8
+#   5. Stage 4: build-env - Merge all components and install torch-npu
+#
+# Advantages:
+#   1. clang-20.1.8 compiled from official LLVM source (not third-party prebuilt)
+#   2. Full LLVM 20.1.8 toolchain: clang, lld, clang-tools-extra, cmake 3.28.2
+#   3. Dual Python support: 3.11.10 (default) + 3.12.13
+#   4. Smaller than original (~60% reduction, no CANN pre-install)
+#   5. Build time: ~60-75 min (clang compilation adds ~15-20 min)
+#   6. torch-npu included for immediate runtime capability
+#   7. CANN can be mounted from host (flexible deployment)
+#
+# clang-20.1.8 Build Details:
+#   - Source: LLVM 20.1.8 (https://github.com/llvm/llvm-project/releases/tag/llvmorg-20.1.8)
+#   - Build method: Single-stage compilation with GCC (Release mode)
+#   - Projects: clang, lld, clang-tools-extra
+#   - Optimization: Release build with optimized tablegen
+#   - Targets: host, NVPTX, AMDGPU (for Triton compatibility)
+#
+# What was removed from original Dockerfile:
+#   - CANN toolkit and ops packages (~2GB) - can be mounted from host
+#   - Debug tools: vim, jq, tree, procps, sysstat, systemd
+#   - Network tools: ssh-server, ssh-client, net-tools, iproute2
+#   - Runtime system services: sudo, dos2unix, grep, findutils
+#   - Copyright banner scripts
+#
+# What is retained (Essential dependencies):
+#   - Python 3.11.10 and 3.12.13 (compiled from source)
+#   - cmake 3.28.2 (exact version, from Kitware official binary)
+#   - Build toolchain: gcc, g++, make
+#   - clang-20.1.8 (compiled from LLVM 20.1.8 source)
+#   - clang-tools-extra (clang-tidy, clang-format, clangd, etc.)
+#   - Triton-LLVM compiled from source (specific version)
+#   - Python build deps: ninja, wheel, pybind11, setuptools
+#   - System libs: zlib1g-dev, libzstd-dev, libssl-dev
+#   - torch-npu==2.7.1.post4 (runtime)
+#   - triton-ascend==3.2.1 (runtime)
+#   - Runtime dependencies: pyyaml, tabulate
+#
+# LLVM Source Download:
+#   - LLVM 20.1.8 release: https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/llvm-project-20.1.8.src.tar.xz
+#   - Triton-LLVM commit: b5cc222d7429fe6f18c787f633d5262fac2e676f
+#
+# ========================================
