@@ -172,12 +172,12 @@ WORKDIR /build
 # Clone and checkout specific LLVM version (same as original Dockerfile)
 RUN git clone --no-checkout --branch main https://github.com/llvm/llvm-project.git \
     && cd llvm-project \
-    && git fetch origin fad3272286528b8a491085183434c5ad4b59ab92 \
-    && git checkout fad3272286528b8a491085183434c5ad4b59ab92 \
+    && git fetch origin f6ded0be897e2878612dd903f7e8bb85448269e5 \
+    && git checkout f6ded0be897e2878612dd903f7e8bb85448269e5 \
     && git clone --no-checkout --branch main https://github.com/triton-lang/triton-ascend.git /tmp/triton-ascend \
-    && cp /tmp/triton-ascend/third_party/ascend/llvm_patch/fad3272.patch ./ \
+    && cp /tmp/triton-ascend/third_party/ascend/llvm_patch/f6ded0b.patch ./ \
     && rm -rf /tmp/triton-ascend \
-    && git apply fad3272.patch
+    && git apply f6ded0b.patch
 
 # Build and install Triton-LLVM using clang-20.1.8
 RUN cd llvm-project \
