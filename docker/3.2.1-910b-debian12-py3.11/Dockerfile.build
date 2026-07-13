@@ -100,6 +100,7 @@ RUN apt-get update \
         ca-certificates \
         bash \
         dos2unix \
+        ninja-build \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -115,15 +116,6 @@ RUN wget -q https://github.com/Kitware/CMake/releases/download/v3.28.2/cmake-3.2
 
 # Install Python build dependencies
 RUN pip install --no-cache-dir \
-    ninja \
-    cmake \
-    wheel \
-    pybind11 \
-    setuptools \
-    --index-url ${PIP_SOURCE}
-
-RUN python3.12 -m pip install --no-cache-dir \
-    ninja \
     cmake \
     wheel \
     pybind11 \
@@ -254,6 +246,14 @@ RUN ln -sf /usr/local/python3.12.13/bin/python3.12 /usr/bin/python3.12 && \
 RUN pip install --no-cache-dir \
     pyyaml \
     tabulate \
+    --index-url ${PIP_SOURCE}
+
+# Install Python3.12 build dependencies
+RUN python3.12 -m pip install --no-cache-dir \
+    cmake \
+    wheel \
+    pybind11 \
+    setuptools \
     --index-url ${PIP_SOURCE}
 
 # Install torch-npu and triton-ascend (based on original Dockerfile)
