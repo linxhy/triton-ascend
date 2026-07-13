@@ -122,6 +122,15 @@ RUN pip install --no-cache-dir \
     setuptools \
     --index-url ${PIP_SOURCE}
 
+# Install Python3.12 build dependencies
+RUN python3.12 -m pip install --no-cache-dir \
+    ninja \
+    cmake \
+    wheel \
+    pybind11 \
+    setuptools \
+    --index-url ${PIP_SOURCE}
+
 # Stage 2: Build clang-20.1.8 from LLVM source
 FROM base AS clang-builder
 
