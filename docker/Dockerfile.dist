@@ -1,0 +1,107 @@
+# syntax=docker/dockerfile:1
+ARG BASE_IMAGE=openeuler/openeuler:24.03-lts-sp1
+
+FROM ${BASE_IMAGE} AS packages
+
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_DEFAULT_TIMEOUT=600 \
+    PIP_RETRIES=5 \
+    VIRTUAL_ENV=/opt/triton-build-venv \
+    PATH=/opt/triton-build-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN dnf -y install \
+      git cmake ninja-build clang lld ccache gcc gcc-c++ \
+      python3 python3-devel python3-pip python3-setuptools \
+      patch wget curl unzip xz tar gzip make which findutils diffutils file \
+      patchelf zlib-devel libxml2-devel ncurses-devel openssl-devel \
+      libffi-devel rpm-build && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+RUN python3 -m venv /opt/triton-build-venv && \
+    python -m pip install --upgrade \
+      pip setuptools wheel packaging \
+      cmake==3.31.6 ninja==1.13.0 && \
+    python -m pip install \
+      torch==2.7.1 torch-npu==2.7.1.post4 \
+      pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
+      pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit && \
+    python -m pip check
+
+FROM packages AS cann-installer
+
+ARG CANN_RUNFILE=Ascend-cann-toolkit_9.1.0-beta.3_linux-aarch64.run
+ARG CANN_SHA256=d51c0a40561d035d7690f0b3150da68216054e8dab141c02bf1fff5ba527ab7d
+COPY ${CANN_RUNFILE} /tmp/cann-toolkit.run
+RUN printf '%s  %s\n' "$CANN_SHA256" /tmp/cann-toolkit.run | sha256sum -c - && \
+    chmod 0755 /tmp/cann-toolkit.run && \
+    /tmp/cann-toolkit.run --install --quiet --install-path=/usr/local/Ascend && \
+    test -f /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    rm -f /tmp/cann-toolkit.run
+
+FROM packages AS llvm-builder
+
+ARG SEED_LLVM_COMMIT=f6ded0be897e2878612dd903f7e8bb85448269e5
+ARG SEED_TRITON_ASCEND_COMMIT=2e69438a0a41a00ab72c7d46b44d97092cf2362c
+ARG SEED_LLVM_JOBS=128
+RUN mkdir -p /tmp/llvm /tmp/triton-ascend /tmp/llvm-build /opt/llvm-cache && \
+    curl -fL --retry 5 --retry-all-errors --connect-timeout 20 --max-time 1800 \
+      "https://codeload.github.com/llvm/llvm-project/tar.gz/${SEED_LLVM_COMMIT}" \
+      -o /tmp/llvm.tar.gz && \
+    curl -fL --retry 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+      "https://codeload.github.com/triton-lang/triton-ascend/tar.gz/${SEED_TRITON_ASCEND_COMMIT}" \
+      -o /tmp/triton-ascend.tar.gz && \
+    gzip -t /tmp/llvm.tar.gz && gzip -t /tmp/triton-ascend.tar.gz && \
+    tar -xzf /tmp/llvm.tar.gz --strip-components=1 -C /tmp/llvm && \
+    tar -xzf /tmp/triton-ascend.tar.gz --strip-components=1 -C /tmp/triton-ascend && \
+    short_commit=$(printf '%.7s' "$SEED_LLVM_COMMIT") && \
+    patch_file="/tmp/triton-ascend/third_party/ascend/patch/llvm_patch_${short_commit}.patch" && \
+    test -f "$patch_file" && \
+    patch_sha=$(sha256sum "$patch_file" | awk '{print $1}') && \
+    cd /tmp/llvm && git apply --check "$patch_file" && git apply "$patch_file" && \
+    cmake -S /tmp/llvm/llvm -B /tmp/llvm-build -G Ninja \
+      -DCMAKE_C_COMPILER=/usr/bin/clang \
+      -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+      -DCMAKE_LINKER=/usr/bin/ld.lld \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DLLVM_ENABLE_ASSERTIONS=ON \
+      '-DLLVM_ENABLE_PROJECTS=mlir;llvm;lld' \
+      '-DLLVM_TARGETS_TO_BUILD=host;NVPTX;AMDGPU' \
+      -DLLVM_ENABLE_LLD=ON \
+      -DCMAKE_INSTALL_PREFIX="/opt/llvm-cache/${SEED_LLVM_COMMIT}" && \
+    cmake --build /tmp/llvm-build --target install --parallel "$SEED_LLVM_JOBS" && \
+    install -m 0755 /tmp/llvm-build/bin/FileCheck \
+      "/opt/llvm-cache/${SEED_LLVM_COMMIT}/bin/FileCheck" && \
+    install -m 0755 /tmp/llvm-build/bin/llvm-lit \
+      "/opt/llvm-cache/${SEED_LLVM_COMMIT}/bin/llvm-lit" && \
+    printf 'llvm_commit=%s\npatch_sha256=%s\nconfigure_version=1\n' \
+      "$SEED_LLVM_COMMIT" "$patch_sha" \
+      >"/opt/llvm-cache/${SEED_LLVM_COMMIT}/.triton-builder-stamp" && \
+    rm -rf /tmp/llvm /tmp/llvm-build /tmp/triton-ascend /tmp/*.tar.gz
+
+FROM packages AS final
+
+ARG CANN_VERSION=9.1.0-beta.3
+ARG SEED_LLVM_COMMIT=f6ded0be897e2878612dd903f7e8bb85448269e5
+ARG SOURCE_URL=https://gitcode.com/Ascend/Triton-distributed-ascend.git
+LABEL org.opencontainers.image.title="Triton-distributed-ascend builder" \
+      org.opencontainers.image.description="Reusable aarch64 builder for shmem and triton_dist wheels" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      io.ascend.cann.version="${CANN_VERSION}" \
+      io.triton.builder.seed-llvm="${SEED_LLVM_COMMIT}"
+
+COPY --from=cann-installer /usr/local/Ascend /usr/local/Ascend
+COPY --from=llvm-builder /opt/llvm-cache /opt/llvm-cache
+COPY config/versions.env /etc/triton-builder/versions.env
+COPY build-triton-distributed-ascend.sh /usr/local/bin/build-triton-distributed-ascend
+RUN chmod 0755 /usr/local/bin/build-triton-distributed-ascend && \
+    mkdir -p /workspace/output /workspace/work /workspace/cache
+
+ENV TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+    CCACHE_DIR=/workspace/cache/ccache \
+    PIP_CACHE_DIR=/workspace/cache/pip
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/build-triton-distributed-ascend"]
