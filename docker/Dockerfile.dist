@@ -96,9 +96,12 @@ LABEL org.opencontainers.image.title="Triton-distributed-ascend builder" \
 COPY --from=cann-installer /usr/local/Ascend /usr/local/Ascend
 COPY --from=llvm-builder /opt/llvm-cache /opt/llvm-cache
 COPY config/versions.env /etc/triton-builder/versions.env
-RUN mkdir -p /workspace/output /workspace/work /workspace/cache
+COPY build-triton-distributed-ascend.sh /usr/local/bin/build-triton-distributed-ascend
+RUN chmod 0755 /usr/local/bin/build-triton-distributed-ascend && \
+    mkdir -p /workspace/output /workspace/work /workspace/cache
 
 ENV TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
     CCACHE_DIR=/workspace/cache/ccache \
     PIP_CACHE_DIR=/workspace/cache/pip
 WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/build-triton-distributed-ascend"]
