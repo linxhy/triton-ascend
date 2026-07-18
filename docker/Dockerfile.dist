@@ -22,13 +22,12 @@ RUN dnf -y install \
     rm -rf /var/cache/dnf
 
 RUN python3 -m venv /opt/triton-build-venv && \
-    python -m pip install --upgrade \
-      pip setuptools wheel packaging \
-      cmake==3.31.6 ninja==1.13.0 && \
+    python -m pip install --upgrade pip setuptools wheel packaging cmake==3.31.6 ninja==1.13.0 && \
+    python -m pip install torch==2.7.1+cpu --index-url https://download.pytorch.org/whl/cpu && \
     python -m pip install \
-      torch==2.7.1 torch-npu==2.7.1.post4 \
-      pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
-      pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit && \
+    torch-npu==2.7.1.post4 \
+    pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
+    pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit && \
     python -m pip check
 
 FROM packages AS llvm-builder
