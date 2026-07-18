@@ -31,17 +31,6 @@ RUN python3 -m venv /opt/triton-build-venv && \
       pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit && \
     python -m pip check
 
-FROM packages AS cann-installer
-
-ARG CANN_RUNFILE=Ascend-cann-toolkit_9.1.0-beta.3_linux-aarch64.run
-ARG CANN_SHA256=d51c0a40561d035d7690f0b3150da68216054e8dab141c02bf1fff5ba527ab7d
-COPY ${CANN_RUNFILE} /tmp/cann-toolkit.run
-RUN printf '%s  %s\n' "$CANN_SHA256" /tmp/cann-toolkit.run | sha256sum -c - && \
-    chmod 0755 /tmp/cann-toolkit.run && \
-    /tmp/cann-toolkit.run --install --quiet --install-path=/usr/local/Ascend && \
-    test -f /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    rm -f /tmp/cann-toolkit.run
-
 FROM packages AS llvm-builder
 
 ARG SEED_LLVM_COMMIT=f6ded0be897e2878612dd903f7e8bb85448269e5
@@ -84,16 +73,13 @@ RUN mkdir -p /tmp/llvm /tmp/triton-ascend /tmp/llvm-build /opt/llvm-cache && \
 
 FROM packages AS final
 
-ARG CANN_VERSION=9.1.0-beta.3
 ARG SEED_LLVM_COMMIT=f6ded0be897e2878612dd903f7e8bb85448269e5
 ARG SOURCE_URL=https://gitcode.com/Ascend/Triton-distributed-ascend.git
 LABEL org.opencontainers.image.title="Triton-distributed-ascend builder" \
       org.opencontainers.image.description="Reusable aarch64 builder for shmem and triton_dist wheels" \
       org.opencontainers.image.source="${SOURCE_URL}" \
-      io.ascend.cann.version="${CANN_VERSION}" \
       io.triton.builder.seed-llvm="${SEED_LLVM_COMMIT}"
 
-COPY --from=cann-installer /usr/local/Ascend /usr/local/Ascend
 COPY --from=llvm-builder /opt/llvm-cache /opt/llvm-cache
 COPY config/versions.env /etc/triton-builder/versions.env
 COPY build-triton-distributed-ascend.sh /usr/local/bin/build-triton-distributed-ascend
