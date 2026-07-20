@@ -1,18 +1,34 @@
+# 多架构构建前置：必须使用 buildx，--platform linux/amd64,linux/arm64
+# 构建命令示例：docker buildx build --platform linux/amd64,linux/arm64 -t triton-build:multi-arch --push .
+
+# 阶段1：LLVM 编译构建器（分架构编译LLVM，amd64含NVPTX，arm64仅AMDGPU/host适配昇腾）
 FROM openeuler/openeuler:24.03-lts-sp1 AS llvm-builder
-
 ARG LLVM_COMMIT=b5cc222d7429fe6f18c787f633d5262fac2e676f
+# Buildx 内置架构变量：amd64=x86_64, arm64=aarch64
+ARG TARGETARCH
 
+# 基础编译依赖，双架构通用
 RUN dnf -y install \
       clang lld gcc gcc-c++ cmake ninja-build curl tar xz \
       zlib-devel libxml2-devel ncurses-devel && \
     dnf clean all && rm -rf /var/cache/dnf
 
+# 下载llvm源码
 RUN curl --fail --location --retry 5 --retry-all-errors \
       "https://codeload.github.com/llvm/llvm-project/tar.gz/${LLVM_COMMIT}" \
       -o /tmp/llvm-project.tar.gz && \
     install -d /tmp/llvm-src /tmp/llvm-build "/opt/llvm/${LLVM_COMMIT}" && \
     tar -xzf /tmp/llvm-project.tar.gz --strip-components=1 -C /tmp/llvm-src && \
-    test -f /tmp/llvm-src/llvm/CMakeLists.txt && \
+    test -f /tmp/llvm-src/llvm/CMakeLists.txt
+
+# 按架构区分 LLVM Target 编译列表
+# amd64(x86_64): host + NVPTX + AMDGPU
+# arm64(aarch64): host + AMDGPU（昇腾NPU不需要NVPTX，减少编译耗时）
+RUN if [ "${TARGETARCH}" = "amd64" ]; then \
+        TARGETS="host;NVPTX;AMDGPU"; \
+    else \
+        TARGETS="host;AMDGPU"; \
+    fi && \
     cmake -S /tmp/llvm-src/llvm -B /tmp/llvm-build -G Ninja \
       -DCMAKE_C_COMPILER=/usr/bin/clang \
       -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
@@ -20,7 +36,7 @@ RUN curl --fail --location --retry 5 --retry-all-errors \
       -DCMAKE_BUILD_TYPE=Release \
       -DLLVM_ENABLE_ASSERTIONS=ON \
       -DLLVM_ENABLE_PROJECTS='mlir;lld' \
-      -DLLVM_TARGETS_TO_BUILD='host;NVPTX;AMDGPU' \
+      -DLLVM_TARGETS_TO_BUILD="${TARGETS}" \
       -DLLVM_ENABLE_LLD=ON \
       -DCMAKE_INSTALL_PREFIX="/opt/llvm/${LLVM_COMMIT}" && \
     cmake --build /tmp/llvm-build --parallel "$(nproc)" && \
@@ -33,11 +49,13 @@ RUN curl --fail --location --retry 5 --retry-all-errors \
       > "/opt/llvm/${LLVM_COMMIT}/.triton-llvm-stamp" && \
     rm -rf /tmp/llvm-src /tmp/llvm-build /tmp/llvm-project.tar.gz
 
+# 阶段2：最终运行镜像，双架构差异化python依赖
 FROM openeuler/openeuler:24.03-lts-sp1
-
 ARG LLVM_COMMIT=b5cc222d7429fe6f18c787f633d5262fac2e676f
 ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+ARG TARGETARCH
 
+# 全局环境变量（双架构通用）
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     PIP_INDEX_URL=${PIP_INDEX_URL} \
@@ -49,6 +67,7 @@ ENV LANG=C.UTF-8 \
     PATH=/opt/triton-build-venv/bin:/opt/llvm/${LLVM_COMMIT}/bin:/usr/local/bin:/usr/bin:/bin \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
+# 系统基础包，x86_64 / aarch64 通用
 RUN dnf -y install \
       git gcc gcc-c++ clang lld binutils ccache cmake ninja-build make patch \
       python3 python3-devel python3-pip python3-setuptools \
@@ -57,22 +76,33 @@ RUN dnf -y install \
       procps-ng util-linux shadow-utils && \
     dnf clean all && rm -rf /var/cache/dnf
 
+# 初始化Python虚拟环境，锁定3.11
 RUN python3 --version | grep -E '^Python 3\.11\.' && \
     python3 -m venv /opt/triton-build-venv && \
     ln -sf /usr/bin/python3 /usr/local/bin/python3.11 && \
-    python -m pip install --upgrade pip setuptools wheel packaging && \
-    pip config set global.extra-index-url https://ascend-pypi.myhuaweicloud.com/repository/pypi/simple && \
-    pip config set global.trusted-host ascend-pypi.myhuaweicloud.com && \
-    pip config set global.extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn && \
-    python -m pip install \
-        cmake==3.31.6 ninja==1.13.0 \
-        torch-npu==2.7.1.post4 \
-        pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
-        pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit
+    python -m pip install --upgrade pip setuptools wheel packaging
 
+# 分架构安装PyTorch：
+# arm64(aarch64): 昇腾环境，安装 torch + torch-npu
+# amd64(x86_64): 标准cuda环境，仅安装torch，不装torch-npu
+RUN if [ "${TARGETARCH}" = "arm64" ]; then \
+        python -m pip install \
+          cmake==3.31.6 ninja==1.13.0 \
+          torch==2.7.1 torch-npu==2.7.1.post4 \
+          pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
+          pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit; \
+    else \
+        python -m pip install \
+          cmake==3.31.6 ninja==1.13.0 \
+          torch==2.7.1 \
+          pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
+          pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit; \
+    fi
+
+# 从对应架构的builder拷贝预编译LLVM
 COPY --from=llvm-builder /opt/llvm/ /opt/llvm/
 
+# 校验LLVM完整性 + 构建目录初始化
 RUN test -x "$LLVM_SYSPATH/bin/llvm-config" && \
     grep -Fx "llvm_commit=$TRITON_LLVM_COMMIT" \
       "$LLVM_SYSPATH/.triton-llvm-stamp" && \
