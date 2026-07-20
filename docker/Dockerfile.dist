@@ -61,7 +61,7 @@ RUN python3 --version | grep -E '^Python 3\.11\.' && \
     python3 -m venv /opt/triton-build-venv && \
     ln -sf /usr/bin/python3 /usr/local/bin/python3.11 && \
     python -m pip install --upgrade pip setuptools wheel packaging && \
-    pip config set global.extra-index-url https://ascend-pypi.myhuaweicloud.com/repository/pypi/simple https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip config set global.extra-index-urls "https://ascend-pypi.myhuaweicloud.com/repository/pypi/simple https://pypi.tuna.tsinghua.edu.cn/simple" && \
     python -m pip install \
         cmake==3.31.6 ninja==1.13.0 \
         torch-npu==2.7.1.post4 \
