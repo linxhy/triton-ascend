@@ -1,92 +1,79 @@
-# syntax=docker/dockerfile:1
-ARG BASE_IMAGE=openeuler/openeuler:24.03-lts-sp1
+FROM openeuler/openeuler:24.03-lts-sp1 AS llvm-builder
 
-FROM ${BASE_IMAGE} AS packages
-
-ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
-ENV LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 \
-    PIP_INDEX_URL=${PIP_INDEX_URL} \
-    PIP_DEFAULT_TIMEOUT=600 \
-    PIP_RETRIES=5 \
-    VIRTUAL_ENV=/opt/triton-build-venv \
-    PATH=/opt/triton-build-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ARG LLVM_COMMIT=b5cc222d7429fe6f18c787f633d5262fac2e676f
 
 RUN dnf -y install \
-      git cmake ninja-build clang lld ccache gcc gcc-c++ \
-      python3 python3-devel python3-pip python3-setuptools \
-      patch wget curl unzip xz tar gzip make which findutils diffutils file \
-      patchelf zlib-devel libxml2-devel ncurses-devel openssl-devel \
-      libffi-devel rpm-build && \
-    dnf clean all && \
-    rm -rf /var/cache/dnf
+      clang lld gcc gcc-c++ cmake ninja-build curl tar xz \
+      zlib-devel libxml2-devel ncurses-devel && \
+    dnf clean all && rm -rf /var/cache/dnf
 
-RUN python3 -m venv /opt/triton-build-venv && \
-    python -m pip install --upgrade pip setuptools wheel packaging cmake==3.31.6 ninja==1.13.0 && \
-    python -m pip install torch==2.7.1+cpu --index-url https://download.pytorch.org/whl/cpu && \
-    python -m pip install \
-    torch-npu==2.7.1.post4 \
-    pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
-    pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit && \
-    python -m pip check
-
-FROM packages AS llvm-builder
-
-ARG SEED_LLVM_COMMIT=f6ded0be897e2878612dd903f7e8bb85448269e5
-ARG SEED_TRITON_ASCEND_COMMIT=2e69438a0a41a00ab72c7d46b44d97092cf2362c
-ARG SEED_LLVM_JOBS=128
-RUN mkdir -p /tmp/llvm /tmp/triton-ascend /tmp/llvm-build /opt/llvm-cache && \
-    curl -fL --retry 5 --retry-all-errors --connect-timeout 20 --max-time 1800 \
-      "https://codeload.github.com/llvm/llvm-project/tar.gz/${SEED_LLVM_COMMIT}" \
-      -o /tmp/llvm.tar.gz && \
-    curl -fL --retry 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
-      "https://codeload.github.com/triton-lang/triton-ascend/tar.gz/${SEED_TRITON_ASCEND_COMMIT}" \
-      -o /tmp/triton-ascend.tar.gz && \
-    gzip -t /tmp/llvm.tar.gz && gzip -t /tmp/triton-ascend.tar.gz && \
-    tar -xzf /tmp/llvm.tar.gz --strip-components=1 -C /tmp/llvm && \
-    tar -xzf /tmp/triton-ascend.tar.gz --strip-components=1 -C /tmp/triton-ascend && \
-    short_commit=$(printf '%.7s' "$SEED_LLVM_COMMIT") && \
-    patch_file="/tmp/triton-ascend/third_party/ascend/patch/llvm_patch_${short_commit}.patch" && \
-    test -f "$patch_file" && \
-    patch_sha=$(sha256sum "$patch_file" | awk '{print $1}') && \
-    cd /tmp/llvm && git apply --check "$patch_file" && git apply "$patch_file" && \
-    cmake -S /tmp/llvm/llvm -B /tmp/llvm-build -G Ninja \
+RUN curl --fail --location --retry 5 --retry-all-errors \
+      "https://codeload.github.com/llvm/llvm-project/tar.gz/${LLVM_COMMIT}" \
+      -o /tmp/llvm-project.tar.gz && \
+    install -d /tmp/llvm-src /tmp/llvm-build "/opt/llvm/${LLVM_COMMIT}" && \
+    tar -xzf /tmp/llvm-project.tar.gz --strip-components=1 -C /tmp/llvm-src && \
+    test -f /tmp/llvm-src/llvm/CMakeLists.txt && \
+    cmake -S /tmp/llvm-src/llvm -B /tmp/llvm-build -G Ninja \
       -DCMAKE_C_COMPILER=/usr/bin/clang \
       -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
       -DCMAKE_LINKER=/usr/bin/ld.lld \
       -DCMAKE_BUILD_TYPE=Release \
       -DLLVM_ENABLE_ASSERTIONS=ON \
-      '-DLLVM_ENABLE_PROJECTS=mlir;llvm;lld' \
-      '-DLLVM_TARGETS_TO_BUILD=host;NVPTX;AMDGPU' \
+      -DLLVM_ENABLE_PROJECTS='mlir;lld' \
+      -DLLVM_TARGETS_TO_BUILD='host;NVPTX;AMDGPU' \
       -DLLVM_ENABLE_LLD=ON \
-      -DCMAKE_INSTALL_PREFIX="/opt/llvm-cache/${SEED_LLVM_COMMIT}" && \
-    cmake --build /tmp/llvm-build --target install --parallel "$SEED_LLVM_JOBS" && \
+      -DCMAKE_INSTALL_PREFIX="/opt/llvm/${LLVM_COMMIT}" && \
+    cmake --build /tmp/llvm-build --parallel "$(nproc)" && \
+    cmake --install /tmp/llvm-build && \
     install -m 0755 /tmp/llvm-build/bin/FileCheck \
-      "/opt/llvm-cache/${SEED_LLVM_COMMIT}/bin/FileCheck" && \
+      "/opt/llvm/${LLVM_COMMIT}/bin/FileCheck" && \
     install -m 0755 /tmp/llvm-build/bin/llvm-lit \
-      "/opt/llvm-cache/${SEED_LLVM_COMMIT}/bin/llvm-lit" && \
-    printf 'llvm_commit=%s\npatch_sha256=%s\nconfigure_version=1\n' \
-      "$SEED_LLVM_COMMIT" "$patch_sha" \
-      >"/opt/llvm-cache/${SEED_LLVM_COMMIT}/.triton-builder-stamp" && \
-    rm -rf /tmp/llvm /tmp/llvm-build /tmp/triton-ascend /tmp/*.tar.gz
+      "/opt/llvm/${LLVM_COMMIT}/bin/llvm-lit" && \
+    printf 'llvm_commit=%s\n' "$LLVM_COMMIT" \
+      > "/opt/llvm/${LLVM_COMMIT}/.triton-llvm-stamp" && \
+    rm -rf /tmp/llvm-src /tmp/llvm-build /tmp/llvm-project.tar.gz
 
-FROM packages AS final
+FROM openeuler/openeuler:24.03-lts-sp1
 
-ARG SEED_LLVM_COMMIT=f6ded0be897e2878612dd903f7e8bb85448269e5
-ARG SOURCE_URL=https://gitcode.com/Ascend/Triton-distributed-ascend.git
-LABEL org.opencontainers.image.title="Triton-distributed-ascend builder" \
-      org.opencontainers.image.description="Reusable aarch64 builder for shmem and triton_dist wheels" \
-      org.opencontainers.image.source="${SOURCE_URL}" \
-      io.triton.builder.seed-llvm="${SEED_LLVM_COMMIT}"
+ARG LLVM_COMMIT=b5cc222d7429fe6f18c787f633d5262fac2e676f
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 
-COPY --from=llvm-builder /opt/llvm-cache /opt/llvm-cache
-COPY config/versions.env /etc/triton-builder/versions.env
-COPY build-triton-distributed-ascend.sh /usr/local/bin/build-triton-distributed-ascend
-RUN chmod 0755 /usr/local/bin/build-triton-distributed-ascend && \
-    mkdir -p /workspace/output /workspace/work /workspace/cache
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_DEFAULT_TIMEOUT=600 \
+    PIP_RETRIES=5 \
+    TRITON_LLVM_COMMIT=${LLVM_COMMIT} \
+    LLVM_SYSPATH=/opt/llvm/${LLVM_COMMIT} \
+    VIRTUAL_ENV=/opt/triton-build-venv \
+    PATH=/opt/triton-build-venv/bin:/opt/llvm/${LLVM_COMMIT}/bin:/usr/local/bin:/usr/bin:/bin \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
-ENV TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
-    CCACHE_DIR=/workspace/cache/ccache \
-    PIP_CACHE_DIR=/workspace/cache/pip
+RUN dnf -y install \
+      git gcc gcc-c++ clang lld binutils ccache cmake ninja-build make patch \
+      python3 python3-devel python3-pip python3-setuptools \
+      unzip zip xz tar which findutils diffutils file patchelf \
+      zlib-devel libxml2-devel ncurses-devel openssl-devel libffi-devel \
+      procps-ng util-linux shadow-utils && \
+    dnf clean all && rm -rf /var/cache/dnf
+
+RUN python3 --version | grep -E '^Python 3\.11\.' && \
+    python3 -m venv /opt/triton-build-venv && \
+    ln -sf /usr/bin/python3 /usr/local/bin/python3.11 && \
+    python -m pip install --upgrade pip setuptools wheel packaging && \
+    python -m pip install \
+      cmake==3.31.6 ninja==1.13.0 \
+      torch==2.7.1 torch-npu==2.7.1.post4 \
+      pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
+      pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit
+
+COPY --from=llvm-builder /opt/llvm/ /opt/llvm/
+
+RUN test -x "$LLVM_SYSPATH/bin/llvm-config" && \
+    grep -Fx "llvm_commit=$TRITON_LLVM_COMMIT" \
+      "$LLVM_SYSPATH/.triton-llvm-stamp" && \
+    install -d /workspace/installers /workspace/input /workspace/work \
+      /workspace/cache /workspace/output /workspace/logs
+
 WORKDIR /workspace
-ENTRYPOINT ["/usr/local/bin/build-triton-distributed-ascend"]
+CMD ["/bin/bash"]
