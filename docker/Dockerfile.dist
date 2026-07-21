@@ -41,12 +41,19 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
       -DLLVM_TARGETS_TO_BUILD="${TARGETS}" \
       -DLLVM_ENABLE_LLD=ON \
       -DCMAKE_INSTALL_PREFIX="/opt/llvm/${LLVM_COMMIT}" \
+      # 裁剪编译产物，减少内存占用
       -DLLVM_BUILD_EXAMPLES=OFF \
       -DLLVM_BUILD_TESTS=OFF \
       -DLLVM_INCLUDE_TESTS=OFF \
-      -DLLVM_INCLUDE_EXAMPLES=OFF && \
-    # 强制限制并行数，防止OOM 137错误！！
-    cmake --build /tmp/llvm-build --parallel 2 && \
+      -DLLVM_INCLUDE_EXAMPLES=OFF \
+      -DLLVM_ENABLE_BACKTRACES=OFF \
+      -DLLVM_ENABLE_DUMP=OFF \
+      -DLLVM_ENABLE_WARNINGS=OFF \
+      -DLLVM_ENABLE_ZLIB=ON \
+      # 关键：限制链接内存
+      -DCMAKE_EXE_LINKER_FLAGS="-Wl,--no-keep-memory" && \
+    # 强制单线程编译，最大限度压低内存峰值
+    cmake --build /tmp/llvm-build --parallel 1 && \
     cmake --install /tmp/llvm-build && \
     install -m 0755 /tmp/llvm-build/bin/FileCheck \
       "/opt/llvm/${LLVM_COMMIT}/bin/FileCheck" && \
