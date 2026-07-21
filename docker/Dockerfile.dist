@@ -6,12 +6,12 @@ FROM openeuler/openeuler:22.03-lts-sp4 AS llvm-builder
 ARG LLVM_COMMIT=b5cc222d7429fe6f18c787f633d5262fac2e676f
 ARG TARGETARCH
 
-# 拆分安装包，降低内存峰值，规避137 OOM
+# 拆分成两条安装，降低内存峰值，缓解137 OOM
 RUN dnf -y install clang lld gcc gcc-c++ cmake ninja-build curl tar xz
 RUN dnf -y install zlib-devel libxml2-devel ncurses-devel && \
     dnf clean all && rm -rf /var/cache/dnf
 
-# 【拆分下载、解压两条RUN，降低峰值内存】
+# 拆分下载、解压两条RUN，降低瞬时内存占用
 RUN curl --fail --location --retry 5 --retry-all-errors \
       "https://codeload.github.com/llvm/llvm-project/tar.gz/${LLVM_COMMIT}" \
       -o /tmp/llvm-project.tar.gz
@@ -20,7 +20,7 @@ RUN install -d /tmp/llvm-src /tmp/llvm-build "/opt/llvm/${LLVM_COMMIT}" && \
     tar -xzf /tmp/llvm-project.tar.gz --strip-components=1 -C /tmp/llvm-src && \
     test -f /tmp/llvm-src/llvm/CMakeLists.txt
 
-# 架构区分LLVM Target
+# 按架构区分 LLVM Target
 RUN if [ "${TARGETARCH}" = "amd64" ]; then \
         TARGETS="host;NVPTX;AMDGPU"; \
     else \
@@ -36,7 +36,6 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
       -DLLVM_TARGETS_TO_BUILD="${TARGETS}" \
       -DLLVM_ENABLE_LLD=ON \
       -DCMAKE_INSTALL_PREFIX="/opt/llvm/${LLVM_COMMIT}" && \
-    # 限制并发，防止编译OOM
     cmake --build /tmp/llvm-build --parallel 2 && \
     cmake --install /tmp/llvm-build && \
     install -m 0755 /tmp/llvm-build/bin/FileCheck \
@@ -47,7 +46,7 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
       > "/opt/llvm/${LLVM_COMMIT}/.triton-llvm-stamp" && \
     rm -rf /tmp/llvm-src /tmp/llvm-build /tmp/llvm-project.tar.gz
 
-# 阶段2：最终镜像 openEuler22.03 + Python3.11
+# 阶段2：最终运行镜像 openEuler22.03 + Python3.11
 FROM openeuler/openeuler:22.03-lts-sp4
 ARG LLVM_COMMIT=b5cc222d7429fe6f18c787f633d5262fac2e676f
 ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
@@ -64,8 +63,15 @@ ENV LANG=C.UTF-8 \
     PATH=/opt/triton-build-venv/bin:/opt/llvm/${LLVM_COMMIT}/bin:/usr/local/bin:/usr/bin:/bin \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
-# 开启EPOL源后安装python3.11
-RUN sed -i 's/enabled=0/enabled=1/' /etc/yum.repos.d/openEuler-EPOL.repo && \
+# 手动创建EPOL源，安装python3.11
+RUN cat > /etc/yum.repos.d/openEuler-EPOL.repo <<'EOF'
+[EPOL]
+name=openEuler-EPOL
+baseurl=https://repo.openeuler.org/openEuler-22.03-LTS/EPOL/$basearch/
+enabled=1
+gpgcheck=1
+gpgkey=https://repo.openeuler.org/openEuler-22.03-LTS/OS/$basearch/RPM-GPG-KEY-openEuler
+EOF && \
     dnf makecache && \
     dnf -y install \
       git gcc gcc-c++ clang lld binutils ccache cmake ninja-build make patch \
@@ -75,7 +81,7 @@ RUN sed -i 's/enabled=0/enabled=1/' /etc/yum.repos.d/openEuler-EPOL.repo && \
       procps-ng util-linux shadow-utils && \
     dnf clean all && rm -rf /var/cache/dnf
 
-# 创建软链接：python3 -> python3.11
+# 软链接 python3 指向3.11，覆盖系统默认3.9
 RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
     ln -sf /usr/bin/pip3.11 /usr/bin/pip3 && \
     ln -sf /usr/bin/python3 /usr/local/bin/python3.11
@@ -86,7 +92,7 @@ RUN set -x && \
     python3 -m venv /opt/triton-build-venv && \
     python -m pip install --upgrade pip setuptools wheel packaging
 
-# 分架构安装依赖
+# 分架构安装python依赖
 RUN if [ "${TARGETARCH}" = "arm64" ]; then \
         python -m pip config set global.extra-index-url "https://ascend-pypi.myhuaweicloud.com/repository/pypi/simple ${PIP_INDEX_URL}" && \
         python -m pip config set global.trusted-host ascend-pypi.myhuaweicloud.com mirrors.aliyun.com && \
@@ -106,7 +112,7 @@ RUN if [ "${TARGETARCH}" = "arm64" ]; then \
 # 拷贝预编译LLVM
 COPY --from=llvm-builder /opt/llvm/ /opt/llvm/
 
-# LLVM校验 + 工作目录
+# LLVM完整性校验 + 工作目录
 RUN test -x "$LLVM_SYSPATH/bin/llvm-config" && \
     grep -Fx "llvm_commit=$TRITON_LLVM_COMMIT" \
       "$LLVM_SYSPATH/.triton-llvm-stamp" && \
