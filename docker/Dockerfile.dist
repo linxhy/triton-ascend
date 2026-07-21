@@ -6,13 +6,12 @@ FROM openeuler/openeuler:22.03-lts-sp4 AS llvm-builder
 ARG LLVM_COMMIT=b5cc222d7429fe6f18c787f633d5262fac2e676f
 ARG TARGETARCH
 
-# 基础编译依赖
-RUN dnf -y install \
-      clang lld gcc gcc-c++ cmake ninja-build curl tar xz \
-      zlib-devel libxml2-devel ncurses-devel && \
+# 拆分安装包，降低内存峰值，规避137 OOM
+RUN dnf -y install clang lld gcc gcc-c++ cmake ninja-build curl tar xz
+RUN dnf -y install zlib-devel libxml2-devel ncurses-devel && \
     dnf clean all && rm -rf /var/cache/dnf
 
-# 【拆分下载、解压两条RUN，降低峰值内存，规避137 OOM】
+# 【拆分下载、解压两条RUN，降低峰值内存】
 RUN curl --fail --location --retry 5 --retry-all-errors \
       "https://codeload.github.com/llvm/llvm-project/tar.gz/${LLVM_COMMIT}" \
       -o /tmp/llvm-project.tar.gz
@@ -65,8 +64,10 @@ ENV LANG=C.UTF-8 \
     PATH=/opt/triton-build-venv/bin:/opt/llvm/${LLVM_COMMIT}/bin:/usr/local/bin:/usr/bin:/bin \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
-# 系统基础依赖 + 安装 python3.11（oe2203官方源）
-RUN dnf -y install \
+# 开启EPOL源后安装python3.11
+RUN sed -i 's/enabled=0/enabled=1/' /etc/yum.repos.d/openEuler-EPOL.repo && \
+    dnf makecache && \
+    dnf -y install \
       git gcc gcc-c++ clang lld binutils ccache cmake ninja-build make patch \
       python3.11 python3.11-devel python3.11-pip python3.11-setuptools \
       unzip zip xz tar which findutils diffutils file patchelf \
@@ -74,7 +75,7 @@ RUN dnf -y install \
       procps-ng util-linux shadow-utils && \
     dnf clean all && rm -rf /var/cache/dnf
 
-# 创建软链接：python3 -> python3.11，覆盖系统默认3.9
+# 创建软链接：python3 -> python3.11
 RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
     ln -sf /usr/bin/pip3.11 /usr/bin/pip3 && \
     ln -sf /usr/bin/python3 /usr/local/bin/python3.11
