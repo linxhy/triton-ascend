@@ -1,12 +1,13 @@
 # 多架构构建前置：必须使用 buildx，--platform linux/amd64,linux/arm64
-# 构建命令示例：docker buildx build --platform linux/amd64,linux/arm64 -t triton-build:oe2203-py311-multiarch --push .
+# 构建命令示例：docker buildx build --platform linux/amd64,linux/arm64 -t triton-build:oe2203-multiarch --push .
 
-# 阶段1：LLVM 编译构建器（分架构编译LLVM）
+# 阶段1：LLVM 编译构建器（分架构编译LLVM，amd64含NVPTX，arm64仅AMDGPU/host适配昇腾）
 FROM openeuler/openeuler:22.03-lts-sp4 AS llvm-builder
 ARG LLVM_COMMIT=b5cc222d7429fe6f18c787f633d5262fac2e676f
+# Buildx 内置架构变量：amd64=x86_64, arm64=aarch64
 ARG TARGETARCH
 
-# 拆分成两条安装，降低内存峰值，缓解137 OOM
+# 拆分安装，降低单条RUN内存峰值，缓解137 OOM
 RUN dnf -y install clang lld gcc gcc-c++ cmake ninja-build curl tar xz
 RUN dnf -y install zlib-devel libxml2-devel ncurses-devel && \
     dnf clean all && rm -rf /var/cache/dnf
@@ -20,7 +21,9 @@ RUN install -d /tmp/llvm-src /tmp/llvm-build "/opt/llvm/${LLVM_COMMIT}" && \
     tar -xzf /tmp/llvm-project.tar.gz --strip-components=1 -C /tmp/llvm-src && \
     test -f /tmp/llvm-src/llvm/CMakeLists.txt
 
-# 按架构区分 LLVM Target
+# 按架构区分 LLVM Target 编译列表
+# amd64(x86_64): host + NVPTX + AMDGPU
+# arm64(aarch64): host + AMDGPU（昇腾NPU不需要NVPTX，减少编译耗时）
 RUN if [ "${TARGETARCH}" = "amd64" ]; then \
         TARGETS="host;NVPTX;AMDGPU"; \
     else \
@@ -36,6 +39,7 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
       -DLLVM_TARGETS_TO_BUILD="${TARGETS}" \
       -DLLVM_ENABLE_LLD=ON \
       -DCMAKE_INSTALL_PREFIX="/opt/llvm/${LLVM_COMMIT}" && \
+    # 限制2线程编译，彻底解决exit 137 OOM内存溢出
     cmake --build /tmp/llvm-build --parallel 2 && \
     cmake --install /tmp/llvm-build && \
     install -m 0755 /tmp/llvm-build/bin/FileCheck \
@@ -46,12 +50,13 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
       > "/opt/llvm/${LLVM_COMMIT}/.triton-llvm-stamp" && \
     rm -rf /tmp/llvm-src /tmp/llvm-build /tmp/llvm-project.tar.gz
 
-# 阶段2：最终运行镜像 openEuler22.03 + Python3.11
+# 阶段2：最终运行镜像 openEuler 22.03 LTS
 FROM openeuler/openeuler:22.03-lts-sp4
 ARG LLVM_COMMIT=b5cc222d7429fe6f18c787f633d5262fac2e676f
 ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 ARG TARGETARCH
 
+# 全局环境变量（双架构通用）
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     PIP_INDEX_URL=${PIP_INDEX_URL} \
@@ -63,7 +68,7 @@ ENV LANG=C.UTF-8 \
     PATH=/opt/triton-build-venv/bin:/opt/llvm/${LLVM_COMMIT}/bin:/usr/local/bin:/usr/bin:/bin \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
-# 手动创建EPOL源，安装python3.11
+# 【关键适配22.03】手动写入EPOL源，安装python3.11（22.03默认python3.9）
 RUN cat > /etc/yum.repos.d/openEuler-EPOL.repo <<'EOF'
 [EPOL]
 name=openEuler-EPOL
@@ -81,19 +86,22 @@ EOF && \
       procps-ng util-linux shadow-utils && \
     dnf clean all && rm -rf /var/cache/dnf
 
-# 软链接 python3 指向3.11，覆盖系统默认3.9
+# 软链接 python3 → python3.11，覆盖系统默认3.9
 RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
     ln -sf /usr/bin/pip3.11 /usr/bin/pip3 && \
     ln -sf /usr/bin/python3 /usr/local/bin/python3.11
 
-# 初始化虚拟环境，校验Python3.11
+# 初始化Python虚拟环境，校验3.11版本
 RUN set -x && \
     python3 --version | grep -E '^Python 3\.11\.' && \
     python3 -m venv /opt/triton-build-venv && \
     python -m pip install --upgrade pip setuptools wheel packaging
 
-# 分架构安装python依赖
+# 分架构安装PyTorch：
+# arm64(aarch64): 昇腾环境，仅装torch-npu自动拉取torch==2.7.1+cpu，消除版本冲突
+# amd64(x86_64): 标准cuda环境，仅安装原版torch
 RUN if [ "${TARGETARCH}" = "arm64" ]; then \
+        # 一次性写入双源，不覆盖，加trusted-host放行私有HTTPS源
         python -m pip config set global.extra-index-url "https://ascend-pypi.myhuaweicloud.com/repository/pypi/simple ${PIP_INDEX_URL}" && \
         python -m pip config set global.trusted-host ascend-pypi.myhuaweicloud.com mirrors.aliyun.com && \
         python -m pip install \
@@ -109,10 +117,10 @@ RUN if [ "${TARGETARCH}" = "arm64" ]; then \
           pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit; \
     fi
 
-# 拷贝预编译LLVM
+# 从对应架构的builder拷贝预编译LLVM
 COPY --from=llvm-builder /opt/llvm/ /opt/llvm/
 
-# LLVM完整性校验 + 工作目录
+# 校验LLVM完整性 + 构建目录初始化
 RUN test -x "$LLVM_SYSPATH/bin/llvm-config" && \
     grep -Fx "llvm_commit=$TRITON_LLVM_COMMIT" \
       "$LLVM_SYSPATH/.triton-llvm-stamp" && \
