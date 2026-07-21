@@ -1,15 +1,14 @@
-# 多架构构建前置：必须使用 buildx，--platform linux/amd64,linux/arm64
-# 构建命令示例：docker buildx build --platform linux/amd64,linux/arm64 -t triton-build-oe2203:multi-arch --push .
+# 多架构构建前置：必须使用 buildx
+# 调试优先单架构：docker buildx build --platform linux/amd64 -t triton-build-oe2203:amd64 .
+# 双架构正式构建：docker buildx build --platform linux/amd64,linux/arm64 -t triton-build-oe2203:multi-arch --push .
 
-# 阶段1：LLVM 编译构建器（分架构编译LLVM，amd64含NVPTX，arm64仅AMDGPU/host适配昇腾）
-# ========== 改动1：基础镜像改为OpenEuler 22.03 LTS SP3 ==========
+# 阶段1：LLVM 编译构建器（分架构编译LLVM，amd64含NVPTX，arm64仅AMDGPU适配昇腾）
 FROM openeuler/openeuler:22.03-lts-sp3 AS llvm-builder
 ARG LLVM_COMMIT=b5cc222d7429fe6f18c787f633d5262fac2e676f
 # Buildx 内置架构变量：amd64=x86_64, arm64=aarch64
 ARG TARGETARCH
 
 # 基础编译依赖，双架构通用
-# oe22.03包无变化，无需删减
 RUN dnf -y install \
       clang lld gcc gcc-c++ cmake ninja-build curl tar xz \
       zlib-devel libxml2-devel ncurses-devel && \
@@ -41,7 +40,6 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
       -DLLVM_TARGETS_TO_BUILD="${TARGETS}" \
       -DLLVM_ENABLE_LLD=ON \
       -DCMAKE_INSTALL_PREFIX="/opt/llvm/${LLVM_COMMIT}" \
-      # 裁剪编译产物，减少内存占用
       -DLLVM_BUILD_EXAMPLES=OFF \
       -DLLVM_BUILD_TESTS=OFF \
       -DLLVM_INCLUDE_TESTS=OFF \
@@ -50,9 +48,8 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
       -DLLVM_ENABLE_DUMP=OFF \
       -DLLVM_ENABLE_WARNINGS=OFF \
       -DLLVM_ENABLE_ZLIB=ON \
-      # 关键：限制链接内存
       -DCMAKE_EXE_LINKER_FLAGS="-Wl,--no-keep-memory" && \
-    # 强制单线程编译，最大限度压低内存峰值
+    # 内存紧张环境强制单线程编译，规避OOM 137
     cmake --build /tmp/llvm-build --parallel 1 && \
     cmake --install /tmp/llvm-build && \
     install -m 0755 /tmp/llvm-build/bin/FileCheck \
@@ -64,12 +61,10 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
     rm -rf /tmp/llvm-src /tmp/llvm-build /tmp/llvm-project.tar.gz
 
 # 阶段2：最终运行镜像，双架构差异化python依赖
-# ========== 改动2：基础镜像同步替换为oe22.03 ==========
 FROM openeuler/openeuler:22.03-lts-sp3
 ARG LLVM_COMMIT=b5cc222d7429fe6f18c787f633d5262fac2e676f
 ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 ARG TARGETARCH
-# ========== 新增：Python版本参数 ==========
 ARG PYTHON_VERSION=3.11.10
 ENV PYTHON_PREFIX=/opt/python/${PYTHON_VERSION}
 
@@ -87,7 +82,6 @@ ENV LANG=C.UTF-8 \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
 # 系统基础包，x86_64 / aarch64 通用
-# 补充python编译依赖！oe22.03需要用来源码编译3.11
 RUN dnf -y install \
       git gcc gcc-c++ clang lld binutils ccache cmake ninja-build make patch \
       unzip zip xz tar which findutils diffutils file patchelf \
@@ -96,18 +90,21 @@ RUN dnf -y install \
       libuuid-devel && \
     dnf clean all && rm -rf /var/cache/dnf
 
-# ========== 改动重点：OpenEuler22.03自带python3.9，源码编译Python3.11 ==========
-RUN curl -fL --retry 5 https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz -o /tmp/python.tar.xz && \
+# 源码编译 Python3.11
+# 重要修改：移除 --with-system-expat 修复 pyexpat 缺失；make -j2 控制并发降低内存占用
+RUN curl -fL --retry 5 https://mirrors.ustc.edu.cn/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz -o /tmp/python.tar.xz && \
     mkdir -p /tmp/python-src && tar -xf /tmp/python.tar.xz --strip-components=1 -C /tmp/python-src && \
     cd /tmp/python-src && \
-    ./configure --prefix=${PYTHON_PREFIX} --enable-shared --with-system-expat --with-ssl && \
-    make -j$(nproc) && make install && \
+    ./configure \
+        --prefix=${PYTHON_PREFIX} \
+        --enable-shared \
+        --with-ssl && \
+    make -j2 && make install && \
     echo "${PYTHON_PREFIX}/lib" > /etc/ld.so.conf.d/python311.conf && ldconfig && \
     rm -rf /tmp/python-src /tmp/python.tar.xz && \
-    # 验证python版本
     python3.11 --version
 
-# 初始化Python虚拟环境，锁定3.11（使用我们编译出来的python3.11）
+# 初始化Python虚拟环境，锁定3.11
 RUN python3.11 -m venv /opt/triton-build-venv && \
     ln -sf ${PYTHON_PREFIX}/bin/python3.11 /usr/local/bin/python3.11 && \
     python -m pip install --upgrade pip setuptools wheel packaging
