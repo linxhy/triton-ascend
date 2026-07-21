@@ -68,6 +68,11 @@ ARG TARGETARCH
 ARG PYTHON_VERSION=3.11.10
 ENV PYTHON_PREFIX=/opt/python/${PYTHON_VERSION}
 
+# =====================【关键新增：串行锁】=====================
+# 强制等待 llvm-builder 完整构建结束，才执行下面所有RUN，杜绝两个阶段并行抢内存
+COPY --from=llvm-builder /opt/llvm/${LLVM_COMMIT}/.triton-llvm-stamp /tmp/build-lock.stamp
+# =============================================================
+
 # 全局环境变量（双架构通用）
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
@@ -86,12 +91,12 @@ RUN dnf -y install \
       git gcc gcc-c++ clang lld binutils ccache cmake ninja-build make patch \
       unzip zip xz tar which findutils diffutils file patchelf \
       zlib-devel libxml2-devel ncurses-devel openssl-devel libffi-devel \
-      procps-ng util-linux shadow-utils readline-devel bzip2-devel sqlite-devel tk-devel gdbm-devel \
+      readline-devel bzip2-devel sqlite-devel tk-devel gdbm-devel \
       libuuid-devel && \
     dnf clean all && rm -rf /var/cache/dnf
 
 # 源码编译 Python3.11
-# 重要修改：移除 --with-system-expat 修复 pyexpat 缺失；make -j2 控制并发降低内存占用
+# 移除 --with-system-expat 修复 pyexpat 缺失；make -j2 控制并发降低内存占用
 RUN curl -fL --retry 5 https://mirrors.ustc.edu.cn/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz -o /tmp/python.tar.xz && \
     mkdir -p /tmp/python-src && tar -xf /tmp/python.tar.xz --strip-components=1 -C /tmp/python-src && \
     cd /tmp/python-src && \
