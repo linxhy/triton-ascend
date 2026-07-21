@@ -40,8 +40,13 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
       -DLLVM_ENABLE_PROJECTS='mlir;lld' \
       -DLLVM_TARGETS_TO_BUILD="${TARGETS}" \
       -DLLVM_ENABLE_LLD=ON \
-      -DCMAKE_INSTALL_PREFIX="/opt/llvm/${LLVM_COMMIT}" && \
-    cmake --build /tmp/llvm-build --parallel "$(nproc)" && \
+      -DCMAKE_INSTALL_PREFIX="/opt/llvm/${LLVM_COMMIT}" \
+      -DLLVM_BUILD_EXAMPLES=OFF \
+      -DLLVM_BUILD_TESTS=OFF \
+      -DLLVM_INCLUDE_TESTS=OFF \
+      -DLLVM_INCLUDE_EXAMPLES=OFF && \
+    # 强制限制并行数，防止OOM 137错误！！
+    cmake --build /tmp/llvm-build --parallel 2 && \
     cmake --install /tmp/llvm-build && \
     install -m 0755 /tmp/llvm-build/bin/FileCheck \
       "/opt/llvm/${LLVM_COMMIT}/bin/FileCheck" && \
