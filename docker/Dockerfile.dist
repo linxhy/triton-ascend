@@ -91,8 +91,8 @@ RUN dnf -y install \
       git gcc gcc-c++ clang lld binutils ccache cmake ninja-build make patch \
       unzip zip xz tar which findutils diffutils file patchelf \
       zlib-devel libxml2-devel ncurses-devel openssl-devel libffi-devel \
-      readline-devel bzip2-devel sqlite-devel tk-devel gdbm-devel \
-      libuuid-devel && \
+      procps-ng util-linux shadow-utils readline-devel bzip2-devel sqlite-devel tk-devel gdbm-devel \
+      libuuid-devel glibc-utils && \
     dnf clean all && rm -rf /var/cache/dnf
 
 # 源码编译 Python3.11
