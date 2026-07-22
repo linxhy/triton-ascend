@@ -1,122 +1,67 @@
-# 多架构构建前置：必须使用 buildx
-# 调试优先单架构：docker buildx build --platform linux/amd64 -t triton-build-oe2203:amd64 .
-# 双架构正式构建：docker buildx build --platform linux/amd64,linux/arm64 -t triton-build-oe2203:multi-arch --push .
+# =============================================================================
+# Minimal build image for Triton-distributed-ascend (main branch)
+# Base: openEuler 22.03 LTS-SP1 (aarch64)
+#
+# Design principle: only install what the wheel build actually invokes.
+#   Stage 3 (final image) trims from 25 → 9 dnf packages by auditing every
+#   tool call path in build-triton-dist-bd.sh.
+#
+# Build context must contain:
+#   - fad3272.patch (from triton-ascend submodule: third_party/ascend/llvm_patch/)
+#
+# Build:  docker build -t triton-dist-builder:22.03-aarch64 .
+# =============================================================================
 
-# ==============================================
-# 阶段1：基础环境层【优先构建：系统依赖 + Python3.11 + venv + pip依赖】
-# ==============================================
-FROM openeuler/openeuler:22.03-lts-sp3 AS base-env
-ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
-ARG TARGETARCH
-ARG PYTHON_VERSION=3.11.10
-ENV PYTHON_PREFIX=/opt/python/${PYTHON_VERSION}
+# ── Stage 1: Python 3.11 from source ────────────────────────────────────────
+# openEuler 22.03 ships Python 3.9; we need 3.11 for the cp311 wheel tag.
+# --enable-optimizations runs PGO (needs find + diff for test cleanup).
+FROM openeuler/openeuler:22.03-lts-sp1 AS python-builder
 
-# 全局环境变量（双架构通用）
-ENV LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 \
-    PIP_INDEX_URL=${PIP_INDEX_URL} \
-    PIP_DEFAULT_TIMEOUT=600 \
-    PIP_RETRIES=5 \
-    VIRTUAL_ENV=/opt/triton-build-venv \
-    LD_LIBRARY_PATH=${PYTHON_PREFIX}/lib:${LD_LIBRARY_PATH} \
-    PATH=${PYTHON_PREFIX}/bin:/opt/triton-build-venv/bin:/usr/local/bin:/usr/bin:/bin \
-    TORCH_DEVICE_BACKEND_AUTOLOAD=0
+ARG PY_VERSION=3.11.9
 
-# 系统基础包
-RUN dnf -y install \
-      git gcc gcc-c++ clang lld binutils ccache cmake ninja-build make patch \
-      unzip zip xz tar which findutils diffutils file patchelf \
-      zlib-devel libxml2-devel ncurses-devel openssl-devel libffi-devel \
-      procps-ng util-linux shadow-utils readline-devel bzip2-devel sqlite-devel tk-devel gdbm-devel \
-      libuuid-devel glibc-utils && \
+RUN dnf -y install gcc gcc-c++ make curl tar xz findutils diffutils \
+      openssl-devel zlib-devel libffi-devel xz-devel && \
     dnf clean all && rm -rf /var/cache/dnf
 
-# 源码编译 Python3.11
-RUN curl -fL --retry 5 https://mirrors.ustc.edu.cn/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz -o /tmp/python.tar.xz && \
-    mkdir -p /tmp/python-src && tar -xf /tmp/python.tar.xz --strip-components=1 -C /tmp/python-src && \
-    cd /tmp/python-src && \
-    ./configure \
-        --prefix=${PYTHON_PREFIX} \
-        --enable-shared \
-        --with-ssl && \
-    make -j2 && make install && \
-    echo "${PYTHON_PREFIX}/lib" > /etc/ld.so.conf.d/python311.conf && \
-    rm -rf /tmp/python-src /tmp/python.tar.xz && \
-    python3.11 --version
+RUN curl --fail --location --retry 5 \
+      "https://mirrors.huaweicloud.com/python/${PY_VERSION}/Python-${PY_VERSION}.tgz" \
+      -o /tmp/python.tgz && \
+    tar -xzf /tmp/python.tgz -C /tmp && \
+    cd "/tmp/Python-${PY_VERSION}" && \
+    ./configure --enable-optimizations --enable-shared \
+      LDFLAGS="-Wl,-rpath,/usr/local/lib" && \
+    make -j"$(nproc)" && \
+    make install && \
+    cd / && rm -rf "/tmp/Python-${PY_VERSION}" /tmp/python.tgz
 
-# 初始化Python虚拟环境
-RUN python3.11 -m venv /opt/triton-build-venv && \
-    ln -sf ${PYTHON_PREFIX}/bin/python3.11 /usr/local/bin/python3.11 && \
-    python -m pip install --upgrade pip setuptools wheel packaging
+# ── Stage 2: LLVM 22 from source (with fad3272 MLIR patch) ──────────────────
+# Uses clang 12 + GNU ld (22.03 has no lld package).
+# Build produces lld via LLVM_ENABLE_PROJECTS='mlir;lld'.
+FROM openeuler/openeuler:22.03-lts-sp1 AS llvm-builder
 
-# 分架构安装PyTorch依赖
-RUN if [ "${TARGETARCH}" = "arm64" ]; then \
-        python -m pip install \
-          --retries 10 \
-          --timeout 1200 \
-          --progress-bar off \
-          --no-cache-dir \
-          cmake==3.31.6 ninja==1.13.0 \
-          torch==2.7.1 torch-npu==2.7.1.post4 \
-          pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
-          pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit; \
-    else \
-        python -m pip install \
-          --retries 10 \
-          --timeout 1200 \
-          --progress-bar off \
-          --no-cache-dir \
-          cmake==3.31.6 ninja==1.13.0 \
-          torch==2.7.1 \
-          pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
-          pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit; \
-    fi
+ARG LLVM_COMMIT=fad3272286528b8a491085183434c5ad4b59ab92
 
-# ==============================================
-# 阶段2：LLVM 编译构建器【后置执行】
-# ==============================================
-FROM openeuler/openeuler:22.03-lts-sp3 AS llvm-builder
-ARG LLVM_COMMIT=b5cc222d7429fe6f18c787f633d5262fac2e676f
-ARG TARGETARCH
-
-RUN dnf -y install \
-      clang lld gcc gcc-c++ cmake ninja-build curl tar xz \
-      zlib-devel libxml2-devel ncurses-devel && \
+RUN dnf -y install clang gcc gcc-c++ cmake ninja-build curl tar xz patch \
+      zlib-devel libxml2-devel python3 && \
     dnf clean all && rm -rf /var/cache/dnf
+
+COPY fad3272.patch /tmp/fad3272.patch
 
 RUN curl --fail --location --retry 5 --retry-all-errors \
       "https://codeload.github.com/llvm/llvm-project/tar.gz/${LLVM_COMMIT}" \
-      -o /tmp/llvm-project.tar.gz && \
+      -o /tmp/llvm.tar.gz && \
     install -d /tmp/llvm-src /tmp/llvm-build "/opt/llvm/${LLVM_COMMIT}" && \
-    tar -xzf /tmp/llvm-project.tar.gz --strip-components=1 -C /tmp/llvm-src && \
-    test -f /tmp/llvm-src/llvm/CMakeLists.txt
-
-RUN if [ "${TARGETARCH}" = "amd64" ]; then \
-        TARGETS="host;NVPTX;AMDGPU"; \
-    else \
-        TARGETS="host;AMDGPU"; \
-    fi && \
+    tar -xzf /tmp/llvm.tar.gz --strip-components=1 -C /tmp/llvm-src && \
+    cd /tmp/llvm-src && patch -p1 < /tmp/fad3272.patch && \
     cmake -S /tmp/llvm-src/llvm -B /tmp/llvm-build -G Ninja \
       -DCMAKE_C_COMPILER=/usr/bin/clang \
       -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
-      -DCMAKE_LINKER=/usr/bin/ld.lld \
       -DCMAKE_BUILD_TYPE=Release \
       -DLLVM_ENABLE_ASSERTIONS=ON \
       -DLLVM_ENABLE_PROJECTS='mlir;lld' \
-      -DLLVM_TARGETS_TO_BUILD="${TARGETS}" \
-      -DLLVM_ENABLE_LLD=ON \
-      -DCMAKE_INSTALL_PREFIX="/opt/llvm/${LLVM_COMMIT}" \
-      -DLLVM_BUILD_EXAMPLES=OFF \
-      -DLLVM_BUILD_TESTS=OFF \
-      -DLLVM_INCLUDE_TESTS=OFF \
-      -DLLVM_INCLUDE_EXAMPLES=OFF \
-      -DLLVM_ENABLE_BACKTRACES=OFF \
-      -DLLVM_ENABLE_DUMP=OFF \
-      -DLLVM_ENABLE_WARNINGS=OFF \
-      -DLLVM_ENABLE_ZLIB=ON \
-      -DCMAKE_EXE_LINKER_FLAGS="-Wl,--no-keep-memory" && \
-    # 内存紧张环境建议改为 --parallel 1
-    cmake --build /tmp/llvm-build --parallel $(nproc) && \
+      -DLLVM_TARGETS_TO_BUILD='host;NVPTX;AMDGPU' \
+      -DCMAKE_INSTALL_PREFIX="/opt/llvm/${LLVM_COMMIT}" && \
+    cmake --build /tmp/llvm-build --parallel "$(nproc)" && \
     cmake --install /tmp/llvm-build && \
     install -m 0755 /tmp/llvm-build/bin/FileCheck \
       "/opt/llvm/${LLVM_COMMIT}/bin/FileCheck" && \
@@ -124,27 +69,66 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
       "/opt/llvm/${LLVM_COMMIT}/bin/llvm-lit" && \
     printf 'llvm_commit=%s\n' "$LLVM_COMMIT" \
       > "/opt/llvm/${LLVM_COMMIT}/.triton-llvm-stamp" && \
-    rm -rf /tmp/llvm-src /tmp/llvm-build /tmp/llvm-project.tar.gz
+    rm -rf /tmp/llvm-src /tmp/llvm-build /tmp/llvm.tar.gz /tmp/fad3272.patch
 
-# ==============================================
-# 阶段3：最终镜像【合并基础环境 + 后置编译完成的LLVM】
-# ==============================================
-FROM base-env AS triton-runtime
-ARG LLVM_COMMIT=b5cc222d7429fe6f18c787f633d5262fac2e676f
+# ── Stage 3: Final image (minimal — only what the build script invokes) ─────
+#
+# Package audit (9 packages, down from 25):
+#   gcc-c++     — clang needs libstdc++-devel headers
+#   clang       — C/C++ compiler (TRITON_BUILD_WITH_CLANG_LLD=ON)
+#   binutils    — ar, ld, strip for linking
+#   git         — git apply for patches
+#   zip         — wheel post-processing (add ascend backend)
+#   findutils   — find to locate built wheels
+#   patchelf    — shmem build.sh may call it for RPATH
+#   zlib-devel  — LLVM/triton C++ headers include zlib.h
+#   libxml2-devel — LLVM headers depend on libxml2
+#
+# Removed (not invoked by build script or provided by venv/base image):
+#   ccache, cmake, ninja-build, make, patch, unzip, xz, tar, which, file,
+#   ncurses-devel, openssl-devel, libffi-devel, procps-ng, util-linux,
+#   shadow-utils, diffutils
+#
+# Runtime libs (openssl-libs, libffi, zlib) come from the base image via
+# python3 (dnf's runtime dependency).
+FROM openeuler/openeuler:22.03-lts-sp1
 
-ENV TRITON_LLVM_COMMIT=${LLVM_COMMIT} \
+ARG LLVM_COMMIT=fad3272286528b8a491085183434c5ad4b59ab92
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_DEFAULT_TIMEOUT=600 \
+    PIP_RETRIES=5 \
+    TRITON_LLVM_COMMIT=${LLVM_COMMIT} \
     LLVM_SYSPATH=/opt/llvm/${LLVM_COMMIT} \
-    PATH=/opt/llvm/${LLVM_COMMIT}/bin:${PATH}
+    VIRTUAL_ENV=/opt/triton-build-venv \
+    PATH=/opt/triton-build-venv/bin:/opt/llvm/${LLVM_COMMIT}/bin:/usr/local/bin:/usr/bin:/bin \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
-# LLVM产物最后拷贝进来
+RUN dnf -y install \
+      gcc-c++ clang binutils git zip findutils patchelf \
+      zlib-devel libxml2-devel && \
+    dnf clean all && rm -rf /var/cache/dnf
+
+COPY --from=python-builder /usr/local/ /usr/local/
+RUN /usr/sbin/ldconfig && python3.11 --version | grep -E '^Python 3\.11\.'
+
+RUN python3.11 -m venv /opt/triton-build-venv && \
+    python -m pip install --upgrade pip setuptools wheel packaging && \
+    python -m pip install \
+      cmake==3.31.6 ninja==1.13.0 \
+      torch==2.7.1 torch-npu==2.7.1.post4 \
+      pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
+      pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit
+
 COPY --from=llvm-builder /opt/llvm/ /opt/llvm/
 
-# 校验LLVM完整性 + 工作目录初始化
 RUN test -x "$LLVM_SYSPATH/bin/llvm-config" && \
-    grep -Fx "llvm_commit=$TRITON_LLVM_COMMIT" \
-      "$LLVM_SYSPATH/.triton-llvm-stamp" && \
-    install -d /workspace/installers /workspace/input /workspace/work \
-      /workspace/cache /workspace/output /workspace/logs
+    grep -Fx "llvm_commit=$TRITON_LLVM_COMMIT" "$LLVM_SYSPATH/.triton-llvm-stamp" && \
+    ln -sfn "$LLVM_SYSPATH" /opt/llvm-host && \
+    install -d /workspace/cache /workspace/output /workspace/work /workspace/logs
 
 WORKDIR /workspace
 CMD ["/bin/bash"]
