@@ -50,27 +50,36 @@ RUN python3.11 -m venv /opt/triton-build-venv && \
     python -m pip install --upgrade pip setuptools wheel packaging
 
 # 分架构安装PyTorch依赖
-RUN if [ "${TARGETARCH}" = "arm64" ]; then \
-        python -m pip install \
-          --retries 10 \
-          --timeout 1200 \
-          --progress-bar off \
-          --no-cache-dir \
-          cmake==3.31.6 ninja==1.13.0 \
-          torch==2.7.1 torch-npu==2.7.1.post4 \
-          pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
-          pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit; \
-    else \
-        python -m pip install \
-          --retries 10 \
-          --timeout 1200 \
-          --progress-bar off \
-          --no-cache-dir \
-          cmake==3.31.6 ninja==1.13.0 \
-          torch==2.7.1 \
-          pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
-          pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit; \
-    fi
+RUN export PIP_TIMEOUT=1200; \
+# 优先安装体积较小的依赖包
+python -m pip install \
+    --retries 10 \
+    --timeout 1200 \
+    --progress-bar off \
+    --no-cache-dir \
+    cmake==3.31.6 ninja==1.13.0 \
+    pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
+    pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit; \
+# 单独循环安装巨型torch包，网络断连自动重试
+if [ "${TARGETARCH}" = "arm64" ]; then \
+    set -e; \
+    while ! python -m pip install \
+        --retries 10 \
+        --timeout 1200 \
+        --progress-bar off \
+        --no-cache-dir \
+        torch==2.7.1 torch-npu==2.7.1.post4; \
+    do echo "[WARN] torch install failed, sleep 10s for retry"; sleep 10; done; \
+else \
+    set -e; \
+    while ! python -m pip install \
+        --retries 10 \
+        --timeout 1200 \
+        --progress-bar off \
+        --no-cache-dir \
+        torch==2.7.1; \
+    do echo "[WARN] torch install failed, sleep 10s for retry"; sleep 10; done; \
+fi
 
 # ==============================================
 # 阶段2：LLVM 编译构建器【后置执行】
