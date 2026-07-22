@@ -82,7 +82,8 @@ ENV LANG=C.UTF-8 \
     TRITON_LLVM_COMMIT=${LLVM_COMMIT} \
     LLVM_SYSPATH=/opt/llvm/${LLVM_COMMIT} \
     VIRTUAL_ENV=/opt/triton-build-venv \
-    # 优先使用手动编译python3.11
+    # 新增：Python动态库路径，替代ldconfig
+    LD_LIBRARY_PATH=${PYTHON_PREFIX}/lib:${LD_LIBRARY_PATH} \
     PATH=${PYTHON_PREFIX}/bin:/opt/triton-build-venv/bin:/opt/llvm/${LLVM_COMMIT}/bin:/usr/local/bin:/usr/bin:/bin \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
@@ -105,7 +106,7 @@ RUN curl -fL --retry 5 https://mirrors.ustc.edu.cn/python/${PYTHON_VERSION}/Pyth
         --enable-shared \
         --with-ssl && \
     make -j2 && make install && \
-    echo "${PYTHON_PREFIX}/lib" > /etc/ld.so.conf.d/python311.conf && ldconfig && \
+    echo "${PYTHON_PREFIX}/lib" > /etc/ld.so.conf.d/python311.conf && \
     rm -rf /tmp/python-src /tmp/python.tar.xz && \
     python3.11 --version
 
