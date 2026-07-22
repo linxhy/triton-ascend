@@ -120,12 +120,20 @@ RUN python3.11 -m venv /opt/triton-build-venv && \
 # amd64(x86_64): 标准cuda环境，仅安装torch，不装torch-npu
 RUN if [ "${TARGETARCH}" = "arm64" ]; then \
         python -m pip install \
+          --retries 10 \
+          --timeout 1200 \
+          --progress-bar off \
+          --no-cache-dir \
           cmake==3.31.6 ninja==1.13.0 \
           torch==2.7.1 torch-npu==2.7.1.post4 \
           pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
           pathlib2 psutil 'protobuf==3.20.*' scipy requests absl-py lit; \
     else \
         python -m pip install \
+          --retries 10 \
+          --timeout 1200 \
+          --progress-bar off \
+          --no-cache-dir \
           cmake==3.31.6 ninja==1.13.0 \
           torch==2.7.1 \
           pybind11 attrs cython numpy==1.26.4 decorator sympy cffi pyyaml \
