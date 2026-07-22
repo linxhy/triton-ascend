@@ -50,7 +50,7 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
       -DLLVM_ENABLE_ZLIB=ON \
       -DCMAKE_EXE_LINKER_FLAGS="-Wl,--no-keep-memory" && \
     # 内存紧张环境强制单线程编译，规避OOM 137
-    cmake --build /tmp/llvm-build --parallel 1 && \
+    cmake --build /tmp/llvm-build --parallel "$(nproc)" && \
     cmake --install /tmp/llvm-build && \
     install -m 0755 /tmp/llvm-build/bin/FileCheck \
       "/opt/llvm/${LLVM_COMMIT}/bin/FileCheck" && \
